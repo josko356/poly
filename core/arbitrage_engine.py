@@ -1,10 +1,11 @@
 """
 core/arbitrage_engine.py — Latency-arbitrage opportunity detector.
 
-FIXES vs. Linux version:
-  - _normal_cdf and helpers called via class, not self (fixes NoneType error)
-  - _estimate_up_probability and _confidence_score are now proper @staticmethods
-  - All internal calls use ArbitrageEngine.method() pattern
+Detektira dvije vrste signala:
+  1. Latency arb: cijena na Binance/Coinbase pomakla se >0.3% u 10s,
+     Polymarket jos nije repriceao — kupujemo dok je edge pozitivan.
+  2. Bundle arb: UP.ask + DOWN.ask < 1 - fees — garantirani profit
+     bez obzira na ishod ugovora.
 """
 
 import asyncio
