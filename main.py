@@ -263,6 +263,7 @@ class PolymarketBot:
             db=self.db,
             on_trade_open=self._on_trade_open,
             on_trade_close=self._on_trade_close,
+            on_alert=self._on_alert,
         )
         self.arb = ArbitrageEngine(
             config=config,
@@ -406,6 +407,10 @@ class PolymarketBot:
     async def _on_trade_close(self, pos, pnl: float, status: str):
         await self.telegram.send_trade_closed(pos, pnl, status)
 
+    async def _on_alert(self, message: str):
+        await self.telegram.send_error(message)
+        logger.error("ALERT: %s", message)
+
     async def _on_kill_switch(self, reason: str):
         await self.telegram.send_kill_switch(reason)
 
@@ -450,7 +455,7 @@ class PolymarketBot:
                             await self.engine.execute_opportunity(opp)
                 except Exception as exc:
                     logger.error("Bundle scanner error: %s", exc)
-            await asyncio.sleep(30)
+            await asyncio.sleep(10)
 
     async def _stats_refresher(self):
         while self._running:

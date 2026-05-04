@@ -38,9 +38,12 @@ class RiskManager:
 
         self._on_kill_callbacks: list = []
 
-        # Trade rate limiting (live mode protection)
+        # Ogranicenje brzine tradova (zastita u live modu)
         self._trades_this_hour: int = 0
         self._hour_start: float = time.time()
+        # Bundle tradovi imaju zasebno ogranicenje — ne trose kvotu regularnih tradova
+        self._bundle_trades_this_hour: int = 0
+        self._bundle_hour_start: float = time.time()
 
     # ── Public interface ──────────────────────────────────────────
 
@@ -103,8 +106,9 @@ class RiskManager:
 
     # ── Pre-trade checks ──────────────────────────────────────────
 
-    def can_trade(self) -> tuple[bool, str]:
-        """Vraca (True, "") ako smijemo otvoriti novi trade, inace (False, razlog)."""
+    def can_trade(self, is_bundle: bool = False) -> tuple[bool, str]:
+        """Vraca (True, "") ako smijemo otvoriti novi trade, inace (False, razlog).
+        is_bundle=True: bundle tradovi ne trose kvotu regularnih tradova, imaju vlastiti sat-limit."""
         self.check_day_rollover()
 
         if self._killed:
@@ -113,51 +117,63 @@ class RiskManager:
                 elapsed = time.time() - self._killed_at
                 cooldown = self.config.COOLDOWN_AFTER_KILL_SECS
                 remaining = f" ({max(0, cooldown - elapsed):.0f}s cooldown remaining)"
-            return False, f"Kill switch active: {self._kill_reason}{remaining}"
+            return False, f"Kill switch aktivan: {self._kill_reason}{remaining}"
 
         if self._open_positions >= self.config.MAX_OPEN_POSITIONS:
-            return False, f"Max open positions ({self.config.MAX_OPEN_POSITIONS}) reached"
+            return False, f"Max otvorenih pozicija ({self.config.MAX_OPEN_POSITIONS}) dostignut"
 
         if self.daily_drawdown_pct >= self.config.MAX_DAILY_DRAWDOWN:
             self._trigger_kill(
-                f"Realized daily loss {self.daily_drawdown_pct:.1%} ≥ "
+                f"Realizirani dnevni gubitak {self.daily_drawdown_pct:.1%} >= "
                 f"{self.config.MAX_DAILY_DRAWDOWN:.1%} limit"
             )
             return False, self._kill_reason
 
         if self._current_balance < self.config.MIN_TRADE_USDC:
-            return False, f"Insufficient balance (${self._current_balance:.2f})"
+            return False, f"Nedovoljan balans (${self._current_balance:.2f})"
 
-        # Live trading: minimum absolute balance floor
+        # Live mod: apsolutni minimalni balans + ogranicenje brzine
         is_live = getattr(self.config, "is_live_trading", False)
         if is_live:
             min_floor = getattr(self.config, "MIN_LIVE_BALANCE_USDC", 50.0)
             if self._current_balance < min_floor:
                 self._trigger_kill(
-                    f"Live balance ${self._current_balance:.2f} below floor ${min_floor:.2f}"
+                    f"Live balans ${self._current_balance:.2f} ispod minimuma ${min_floor:.2f}"
                 )
                 return False, self._kill_reason
 
-            # Trade rate limit
             now = time.time()
-            if now - self._hour_start >= 3600:
-                self._trades_this_hour = 0
-                self._hour_start = now
-            max_per_hour = getattr(self.config, "MAX_TRADES_PER_HOUR", 10)
-            if self._trades_this_hour >= max_per_hour:
-                return False, f"Rate limit: {self._trades_this_hour}/{max_per_hour} trades this hour"
+            if is_bundle:
+                # Bundle tradovi imaju vlastiti sat-limit — ne trose kvotu regularnih tradova
+                if now - self._bundle_hour_start >= 3600:
+                    self._bundle_trades_this_hour = 0
+                    self._bundle_hour_start = now
+                max_bundles = getattr(self.config, "BUNDLE_MAX_PER_HOUR", 6)
+                if self._bundle_trades_this_hour >= max_bundles:
+                    return False, f"Bundle rate limit: {self._bundle_trades_this_hour}/{max_bundles} bundleova ovaj sat"
+            else:
+                if now - self._hour_start >= 3600:
+                    self._trades_this_hour = 0
+                    self._hour_start = now
+                max_per_hour = getattr(self.config, "MAX_TRADES_PER_HOUR", 10)
+                if self._trades_this_hour >= max_per_hour:
+                    return False, f"Rate limit: {self._trades_this_hour}/{max_per_hour} tradova ovaj sat"
 
         return True, ""
 
     # ── Balance + position tracking ───────────────────────────────
 
-    def on_trade_opened(self, usdc_spent: float):
+    def on_trade_opened(self, usdc_spent: float, is_bundle: bool = False):
         self._current_balance -= usdc_spent
         self._open_positions += 1
-        self._trades_this_hour += 1
+        if is_bundle:
+            self._bundle_trades_this_hour += 1
+        else:
+            self._trades_this_hour += 1
         self._update_drawdown()
         logger.debug(
-            "Trade opened: -%.2f USDC | balance=%.2f | open=%d",
+            "Trade otvoren%s: -%.2f USDC | balans=%.2f | open=%d",
+            " [BUNDLE]" if is_bundle else "",
             usdc_spent, self._current_balance, self._open_positions,
         )
 
@@ -239,12 +255,14 @@ class RiskManager:
             "starting_balance": self.starting_balance,
             "day_start_balance": self._day_start_balance,
             "daily_pnl": self._daily_pnl,
-            "daily_drawdown_pct": self.daily_drawdown_pct,        # realized losses only
-            "balance_drawdown_pct": self.balance_drawdown_pct,    # includes open allocation
+            "daily_drawdown_pct": self.daily_drawdown_pct,
+            "balance_drawdown_pct": self.balance_drawdown_pct,
             "max_drawdown_today": self._max_drawdown_today,
             "open_positions": self._open_positions,
             "is_killed": self._killed,
             "kill_reason": self._kill_reason,
+            "trades_this_hour": self._trades_this_hour,
+            "bundle_trades_this_hour": self._bundle_trades_this_hour,
             "total_return_pct": (
                 (self._current_balance - self.starting_balance) / self.starting_balance
             ) if self.starting_balance else 0.0,

@@ -56,6 +56,7 @@ class TradingEngine:
         db: Database,
         on_trade_open: Optional[Callable] = None,
         on_trade_close: Optional[Callable] = None,
+        on_alert: Optional[Callable] = None,
     ):
         self.config = config
         self.polymarket = polymarket
@@ -63,6 +64,7 @@ class TradingEngine:
         self.db = db
         self.on_trade_open = on_trade_open
         self.on_trade_close = on_trade_close
+        self.on_alert = on_alert
 
         self.sizer = KellySizer(config)
         self._positions: Dict[int, OpenPosition] = {}
@@ -102,8 +104,8 @@ class TradingEngine:
 
     async def execute_opportunity(self, opp: Opportunity) -> bool:
         """Pokusaj izvrsiti otkrivenu arbitraznu priliku. Vraca True ako je trade otvoren."""
-        # Pre-trade risk checks
-        can, reason = self.risk.can_trade()
+        # Pre-trade provjera rizika (bundle ima vlastiti sat-limit, ne trosi regularnu kvotu)
+        can, reason = self.risk.can_trade(is_bundle=opp.is_bundle)
         if not can:
             logger.info("Trade blocked: %s", reason)
             return False
@@ -144,11 +146,28 @@ class TradingEngine:
             self._pending_keys.add(key)
 
         # Odredivanje velicine pozicije
-        sizing = self.sizer.size(
-            portfolio_balance=self.risk.balance,
-            model_prob=opp.model_prob,
-            entry_price=opp.polymarket_price,
-        )
+        if opp.is_bundle:
+            # Bundle je bez rizika gubitka — Kelly ne vrijedi, koristimo fiksni % slobodnog balansa.
+            # Live mod koristi manji postotak: ako rollback propadne, naked pozicija je samo 20% ne 40%.
+            if self.mode == "live":
+                bundle_pct = getattr(self.config, "BUNDLE_POSITION_PCT_LIVE", 0.20)
+            else:
+                bundle_pct = getattr(self.config, "BUNDLE_POSITION_PCT", 0.40)
+            usdc = max(self.config.MIN_TRADE_USDC,
+                       min(self.risk.balance * bundle_pct, self.risk.balance * 0.90))
+            sizing = SizingResult(
+                kelly_fraction=bundle_pct, half_kelly=bundle_pct,
+                position_pct=bundle_pct, usdc_amount=usdc,
+                shares=usdc / max(opp.polymarket_price, 0.01),
+                entry_price=opp.polymarket_price,
+                expected_value=usdc * opp.edge,
+            )
+        else:
+            sizing = self.sizer.size(
+                portfolio_balance=self.risk.balance,
+                model_prob=opp.model_prob,
+                entry_price=opp.polymarket_price,
+            )
 
         if sizing.usdc_amount < self.config.MIN_TRADE_USDC:
             logger.debug("Trade too small (%.2f USDC) — skipping.", sizing.usdc_amount)
@@ -232,14 +251,11 @@ class TradingEngine:
     async def _open_bundle_trade(self, opp: Opportunity, sizing: SizingResult) -> bool:
         """Bundle arbitraza: kupovina UP + DOWN tokena po ukupnoj cijeni < $1.
         Garantirani profit pri isteku bez obzira na ishod.
-        Napomena: live izvrsavanje nije implementirano — samo paper.
+        Live mod: dva odvojena CLOB ordera s rollbackom ako druga noga propadne.
         """
         if self.mode == "live":
-            logger.warning(
-                "[LIVE] Bundle arb skipped — live two-leg execution not yet implemented "
-                "(would need two separate CLOB orders). Runs in paper mode only."
-            )
-            return False
+            return await self._open_live_bundle(opp, sizing)
+
 
         total_cost_per_pair = opp.polymarket_price  # up_ask + down_ask
         fill_cost = total_cost_per_pair * (1 + self.config.PAPER_FILL_SLIPPAGE)
@@ -249,7 +265,7 @@ class TradingEngine:
         usdc_spent = pairs * fill_cost
         guaranteed_pnl = pairs * opp.edge  # opp.edge = 1 - total_cost - fees
 
-        self.risk.on_trade_opened(usdc_spent)
+        self.risk.on_trade_opened(usdc_spent, is_bundle=True)
 
         record = TradeRecord(
             id=None,
@@ -303,6 +319,97 @@ class TradingEngine:
         return True
 
     # ── Live trading ──────────────────────────────────────────────
+
+    async def _open_live_bundle(self, opp: Opportunity, sizing: SizingResult) -> bool:
+        """
+        Live bundle egzekucija: dva CLOB ordera (UP + DOWN).
+        Ako DOWN noga propadne, pokusavamo rollback UP noge.
+        Ako rollback propadne, salje alert — pozicija zahtijeva rucnu intervenciju.
+        """
+        up_contract = opp.contract
+        down_contract = opp._bundle_down_contract
+        up_ask = opp.order_book.best_ask
+        down_ask = opp._bundle_down_book.best_ask
+        total_per_par = up_ask + down_ask
+
+        parovi = sizing.usdc_amount / total_per_par
+        up_usdc = parovi * up_ask
+        down_usdc = parovi * down_ask
+
+        logger.info("[LIVE BUNDLE] %s %dmin | UP=%.3f DOWN=%.3f | parovi=%.1f | $%.2f",
+                    up_contract.asset, up_contract.duration_mins,
+                    up_ask, down_ask, parovi, sizing.usdc_amount)
+
+        # Noga 1: UP
+        up_result = await self.polymarket.place_market_order(
+            token_id=up_contract.token_id, side="buy", usdc_amount=up_usdc,
+        )
+        if not up_result:
+            logger.error("[LIVE BUNDLE] UP noga propala — nema gubitka, odustajemo")
+            return False
+
+        up_shares = float(up_result.get("size", parovi))
+        up_fill = float(up_result.get("price", up_ask))
+
+        # Noga 2: DOWN
+        down_result = await self.polymarket.place_market_order(
+            token_id=down_contract.token_id, side="buy", usdc_amount=down_usdc,
+        )
+        if not down_result:
+            logger.error("[LIVE BUNDLE] DOWN noga propala — pokusaj rollbacka UP noge")
+            rollback = await self.polymarket.place_market_order(
+                token_id=up_contract.token_id, side="sell", shares=up_shares,
+            )
+            if rollback:
+                logger.info("[LIVE BUNDLE] Rollback UP uspio — nema gubitka")
+            else:
+                msg = (f"BUNDLE ROLLBACK PROPAO — naked UP pozicija ostaje!\n"
+                       f"Token: {up_contract.token_id}\nDionice: {up_shares:.2f}\n"
+                       f"Provjeri rucno na Polymarketu.")
+                logger.error("[LIVE BUNDLE] %s", msg)
+                if self.on_alert:
+                    await self._safe_callback(self.on_alert, msg)
+            return False
+
+        down_shares = float(down_result.get("size", parovi))
+        down_fill = float(down_result.get("price", down_ask))
+        usdc_spent = up_shares * up_fill + down_shares * down_fill
+        guaranteed_pnl = min(up_shares, down_shares) * (1.0 - up_fill - down_fill)
+
+        self.risk.on_trade_opened(usdc_spent, is_bundle=True)
+
+        record = TradeRecord(
+            id=None, timestamp=datetime.utcnow().isoformat(), mode="live",
+            asset=up_contract.asset,
+            contract_id=up_contract.condition_id,
+            contract_question=f"[BUNDLE] {up_contract.question}",
+            direction="BUNDLE", duration_mins=up_contract.duration_mins,
+            entry_price=(up_fill + down_fill), shares=min(up_shares, down_shares),
+            usdc_spent=usdc_spent, edge=opp.edge, confidence=1.0,
+            kelly_size=sizing.half_kelly, polymarket_prob=opp.polymarket_price,
+            model_prob=1.0, coinbase_price=opp.coinbase_price,
+            status="open", pnl=None, exit_timestamp=None,
+        )
+        trade_id = await self.db.insert_trade(record)
+
+        expiry = time.time() + (up_contract.duration_mins * 60)
+        pos = OpenPosition(
+            trade_id=trade_id, opportunity=opp, sizing=sizing,
+            entry_time=time.time(), expected_expiry=expiry, mode="live",
+            paper_entry_price=(up_fill + down_fill),
+            paper_shares=min(up_shares, down_shares),
+            paper_usdc_spent=usdc_spent,
+        )
+        pos._guaranteed_pnl = guaranteed_pnl
+        self._positions[trade_id] = pos
+
+        logger.info("[LIVE BUNDLE] Obje noge potvrdjene | $%.2f utroseno | garantirani profit: $%.2f",
+                    usdc_spent, guaranteed_pnl)
+
+        if self.on_trade_open:
+            await self._safe_callback(self.on_trade_open, pos)
+
+        return True
 
     async def _open_live_trade(self, opp: Opportunity, sizing: SizingResult) -> bool:
         # Tvrdi limit: nikad vise od MAX_LIVE_TRADE_USDC po tradu

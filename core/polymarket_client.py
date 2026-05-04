@@ -286,12 +286,16 @@ class PolymarketClient:
     async def place_market_order(
         self,
         token_id: str,
-        side: str,          # "buy" | "sell"
-        usdc_amount: float,
+        side: str,              # "buy" | "sell"
+        usdc_amount: float = 0.0,
+        shares: float = 0.0,    # za sell naloge: broj dionica za prodaju
     ) -> Optional[dict]:
         """
         Postavi market order i cekaj CONFIRMED status.
         Poziva se samo u live modu.
+
+        Buy:  navedi usdc_amount — velicina se racuna iz ask cijene.
+        Sell: navedi shares — prodaje se tocno taj broj dionica po bid cijeni.
 
         V2 CLOB napomena (travanj 2026): ~35% profitabilnih BUY naloga se vraca on-chain.
         MATCHED ≠ namiren — cekamo CONFIRMED prije nego upisemo poziciju.
@@ -311,8 +315,14 @@ class PolymarketClient:
             if not book:
                 return None
 
-            price = book.best_ask if side == "buy" else book.best_bid
-            size  = round(usdc_amount / price, 2)
+            if side == "sell":
+                if shares <= 0:
+                    logger.error("Sell order zahtijeva shares > 0")
+                    return None
+                size = round(shares, 2)
+            else:
+                price = book.best_ask
+                size  = round(usdc_amount / price, 2)
 
             order_args = MarketOrderArgs(token_id=token_id, amount=size)
             signed_order = self._clob_client.create_market_order(order_args)

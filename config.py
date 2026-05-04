@@ -41,7 +41,10 @@ class Config:
     MIN_TRADE_USDC: float = 1.0
     MIN_MARKET_PRICE: float = 0.15   # odbaci duboko OTM ugovore — model nije pouzdan ispod 15¢
     TAKER_FEE: float = 0.02          # Polymarket taker fee po nozi (~2%, stvarni BTC/ETH = 1.80%)
-    BUNDLE_MIN_PROFIT: float = 0.03  # minimalna zagarantirana zarada za bundle arb (nakon feeva)
+    BUNDLE_MIN_PROFIT: float = 0.015   # minimalna zagarantirana zarada za bundle arb (nakon feeva)
+    BUNDLE_POSITION_PCT: float = 0.40  # % balansa po bundle tradu u paper modu
+    BUNDLE_POSITION_PCT_LIVE: float = 0.20  # % balansa po bundle tradu u live modu (manji = manji naked rizik ako rollback propadne)
+    BUNDLE_MAX_PER_HOUR: int = 6       # max bundle tradova po satu u live modu (zasebno od MAX_TRADES_PER_HOUR)
 
     # ── Markets to monitor ───────────────────────────────────────
     UPDOWN_DURATIONS: list = field(default_factory=lambda: [5, 15])
