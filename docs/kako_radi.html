@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+<meta charset="UTF-8">
+<title>Polymarket Latency Arbitrage Bot — Kako radi</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: Georgia, serif; font-size: 15px; color: #1a1a2e; background: #fff; max-width: 860px; margin: 0 auto; padding: 40px 50px; }
+  h1 { font-size: 28px; color: #0f3460; border-bottom: 3px solid #0f3460; padding-bottom: 12px; margin-bottom: 8px; }
+  h2 { font-size: 20px; color: #16213e; margin-top: 36px; margin-bottom: 10px; border-left: 4px solid #e94560; padding-left: 12px; }
+  h3 { font-size: 16px; color: #0f3460; margin-top: 20px; margin-bottom: 6px; }
+  p { line-height: 1.75; margin-bottom: 12px; }
+  .subtitle { color: #555; font-size: 14px; margin-bottom: 30px; }
+  .box { background: #f0f4ff; border: 1px solid #c5d0e6; border-radius: 6px; padding: 16px 20px; margin: 16px 0; }
+  .box.green { background: #f0fff4; border-color: #a3d9a5; }
+  .box.red   { background: #fff0f0; border-color: #f5a5a5; }
+  .box.yellow{ background: #fffbf0; border-color: #f5d87a; }
+  .box strong { color: #0f3460; }
+  ul, ol { margin-left: 24px; margin-bottom: 12px; }
+  li { line-height: 1.8; }
+  code { background: #eef2ff; border-radius: 3px; padding: 1px 6px; font-family: 'Courier New', monospace; font-size: 13px; color: #2d3a8c; }
+  .flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+  .step { background: #0f3460; color: #fff; border-radius: 6px; padding: 8px 14px; font-size: 13px; font-weight: bold; white-space: nowrap; }
+  .arrow { color: #e94560; font-size: 20px; font-weight: bold; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  th { background: #0f3460; color: #fff; padding: 10px 12px; text-align: left; }
+  td { padding: 9px 12px; border-bottom: 1px solid #dde3f0; }
+  tr:nth-child(even) td { background: #f7f9ff; }
+  .tag { display: inline-block; background: #e94560; color: #fff; border-radius: 4px; padding: 2px 8px; font-size: 12px; font-weight: bold; margin-left: 6px; vertical-align: middle; }
+  .tag.green { background: #2e7d32; }
+  .tag.orange { background: #e65100; }
+  hr { border: none; border-top: 1px solid #dde3f0; margin: 30px 0; }
+  .page-break { page-break-before: always; }
+  footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #dde3f0; font-size: 12px; color: #888; text-align: center; }
+  @media print {
+    body { padding: 20px 30px; }
+    .page-break { page-break-before: always; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Polymarket Latency Arbitrage Bot</h1>
+<p class="subtitle">Tehnički vodič — od nule do live tradinga</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<h2>1. Što je Polymarket?</h2>
+
+<p>
+  <strong>Polymarket</strong> je predikta tržište koje radi na <strong>Polygon blockchainu</strong>.
+  Umjesto dionica ili kriptovaluta, trguje se <em>ishodom događaja</em>.
+</p>
+
+<div class="box">
+  <strong>Primjer:</strong> „Hoće li BTC biti iznad $80,000 u 15:05?" <br><br>
+  Kupiš <code>YES</code> token za 55 centi. Ako BTC jest iznad $80k u 15:05 — token isplati <strong>$1.00</strong>.
+  Ako nije — token vrijedi <strong>$0.00</strong>. Zaradio si 45 centi (81% prinos). Izgubio si 55 centi.
+</div>
+
+<p>
+  Ove <strong>UP/DOWN</strong> kontrakti traju 5 ili 15 minuta i otvaraju se svake minute.
+  Referentna cijena za settlement je <strong>Chainlink oracle</strong> — decentraliziran izvor cijene
+  koji čita s više CEX-ova i upisuje rezultat na blockchain svake ~2–3 sekunde.
+</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<h2>2. Što je latency arbitrage?</h2>
+
+<p>
+  Ključna spoznaja: <strong>Polymarket trguje prema cijeni koja kasni ~2.7 sekunde za stvarnom cijenom.</strong>
+</p>
+
+<div class="flow">
+  <div class="step">Coinbase tick<br><small>t = 0ms</small></div>
+  <div class="arrow">→</div>
+  <div class="step">Chainlink oracle<br><small>t ≈ 2700ms</small></div>
+  <div class="arrow">→</div>
+  <div class="step">Polymarket settlement</small></div>
+</div>
+
+<p>
+  Kad BTC skoči za 0.5% u sekundi, Coinbase to odmah vidi. Ali Polymarket market makeri
+  repricicaju kontrakte tek kad novi Chainlink round dođe — za 2–3 sekunde.
+  U tom prozoru, <code>YES</code> token je <em>underpricean</em> jer tržište ne zna za pomak.
+</p>
+
+<div class="box green">
+  <strong>Ideja:</strong> Kupimo <code>YES</code> token dok je još jeftin (tržište ne zna),
+  a 2.7s kasnije Chainlink potvrdi cijenu gore i token poraste. Prodajemo uz profit.
+</div>
+
+<div class="box red">
+  <strong>Rizik:</strong> Ako cijena padne nazad prije isteka kontrakta, gubimo ulog.
+  Zato se koristi matematički model koji procjenjuje vjerojatnost.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<h2>3. Arhitektura bota</h2>
+
+<p>Bot se sastoji od 8 međusobno spojenih modula:</p>
+
+<table>
+  <tr><th>Modul</th><th>Uloga</th></tr>
+  <tr><td><code>coinbase_feed.py</code></td><td>Prima real-time cijene s Coinbase i Binance WebSocket-a (50–200ms latency)</td></tr>
+  <tr><td><code>chainlink_feed.py</code></td><td>Čita Chainlink oracle cijene direktno s Polygon blockchaina (Solidity RPC poziv)</td></tr>
+  <tr><td><code>polymarket_client.py</code></td><td>Prati aktivne kontrakate, prima order bookove via WebSocket, postavlja naloge</td></tr>
+  <tr><td><code>arbitrage_engine.py</code></td><td>Detektira signal, računa model vjerojatnost i edge, filtrira loše prilike</td></tr>
+  <tr><td><code>kelly_sizer.py</code></td><td>Računa optimalan iznos uloga prema Half-Kelly kriteriju</td></tr>
+  <tr><td><code>trading_engine.py</code></td><td>Izvršava trade (paper ili live), prati pozicije, zatvara ih kod early exit/win</td></tr>
+  <tr><td><code>risk_manager.py</code></td><td>Kill switch, max drawdown, max pozicija, rate limiting</td></tr>
+  <tr><td><code>telegram_alerts.py</code></td><td>Šalje alertove i prima /kill /resume /status komande</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<div class="page-break"></div>
+<h2>4. Kako bot detektira prilike — korak po korak</h2>
+
+<div class="flow">
+  <div class="step">1. Price tick<br><small>Binance/Coinbase</small></div>
+  <div class="arrow">→</div>
+  <div class="step">2. LAG check<br><small>≥ 0.3% / 10s</small></div>
+  <div class="arrow">→</div>
+  <div class="step">3. Model<br><small>P(UP)</small></div>
+  <div class="arrow">→</div>
+  <div class="step">4. Edge filter<br><small>≥ 2%</small></div>
+  <div class="arrow">→</div>
+  <div class="step">5. Kelly sizing</div>
+  <div class="arrow">→</div>
+  <div class="step">6. Trade</div>
+</div>
+
+<h3>Korak 1 — Price tick</h3>
+<p>
+  Svaki trade koji se dogodi na Coinbaseu ili Binanceu dolazi kao WebSocket poruka u
+  milisekundama. Bot drži historiju posljednjih 120 sekundi svakog asseta.
+</p>
+
+<h3>Korak 2 — LAG check (signal filter)</h3>
+<p>
+  Bot računa: je li cijena porasla/pala ≥ <strong>0.3%</strong> u zadnjih 10 sekundi?
+  Ispod toga pomaka nema dovoljno edgea jer market makeri repricicaju brže.
+  Tek kad threshold pređemo, skeniramo kontrakate za taj asset.
+</p>
+
+<h3>Korak 3 — Probabilistički model</h3>
+<p>
+  Bot koristi <strong>log-normalnu raspodjelu</strong> cijene da izračuna
+  P(cijena na expiry ≥ price_to_beat). Model kombinira tri faktora:
+</p>
+<ul>
+  <li><strong>50%</strong> — koliko je trenutna cijena iznad/ispod referentne (Chainlink)</li>
+  <li><strong>30%</strong> — momentum (smjer i jačina kratkoročnog pomaka)</li>
+  <li><strong>20%</strong> — order book (što tržište samo implicitno kaže)</li>
+</ul>
+<p>
+  Ako je dostupan Chainlink oracle, a Coinbase cijena odskače ≥ 0.4% od njega,
+  confidence se booste za 15% — to je najjači signal (oracle update je blizu).
+</p>
+
+<h3>Korak 4 — Edge filter</h3>
+<p>
+  Edge = model_prob − tržišna_cijena − taker_fee (2%)
+</p>
+<div class="box">
+  <strong>Primjer:</strong> Tržište prodaje YES token za 44¢ (implicitna vjerojatnost 44%).
+  Model procjenjuje 67% vjerojatnost. Edge = 0.67 − 0.44 − 0.02 = <strong>+0.21 (21%)</strong>. ✓<br><br>
+  Minimum edge za trade je <code>MIN_EDGE = 2%</code>. Ispod toga ne tradamo.
+</div>
+
+<h3>Korak 5 — Half-Kelly position sizing</h3>
+<p>
+  Kelly kriterij je matematička formula za optimalan ulog kojom se maksimizira
+  dugoročni rast portfelja. Bot koristi <strong>pola Kelly</strong> (konzervativnija varijanta):
+</p>
+<div class="box">
+  <code>f* = (p × b − q) / b</code> &nbsp;→&nbsp; <code>ulog = f* × 0.5 × balans</code><br><br>
+  gdje je <strong>b</strong> = neto odds (1/cijena − 1), <strong>p</strong> = model vjerojatnost, <strong>q</strong> = 1−p<br><br>
+  Rezultat je ograničen na max 8% portfelja i max 15% kao apsolutni strop.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<h2>5. Bundle arbitraža</h2>
+
+<p>
+  Poseban tip prilike koji ne ovisi o smjeru cijene.
+  Ako možemo kupiti i UP i DOWN token za zajedno manje od $1.00 (minus fees),
+  zagarantirano zarađujemo — jedan od njih uvijek isplati $1.
+</p>
+
+<div class="box green">
+  <strong>Primjer:</strong> UP token = 45¢, DOWN token = 48¢, ukupno = 93¢<br>
+  Fees (2% × 2 lega) = 1.86¢ → ukupni trošak = 94.86¢<br>
+  <strong>Zagarantiran profit = 5.14¢ po paru, bez obzira na rezultat</strong>
+</div>
+
+<p>
+  Bot ovo skenira svakih 30 sekundi neovisno o cjenovnom signalu.
+  Zaštita: obje noge moraju biti u rasponu 15–85¢ (odbacuje expired kontrakate s $0.01 ponudama).
+</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<div class="page-break"></div>
+<h2>6. Upravljanje rizikom</h2>
+
+<table>
+  <tr><th>Zaštita</th><th>Vrijednost</th><th>Što radi</th></tr>
+  <tr><td>Max dnevni drawdown</td><td>20%</td><td>Aktivira kill switch ako realizirani gubici premaše 20% dnevnog startnog balanasa</td></tr>
+  <tr><td>Max otvorenih pozicija</td><td>6</td><td>Ne otvara novu poziciju ako već ima 6 aktivnih</td></tr>
+  <tr><td>Max per-trade (live)</td><td>15% balanasa</td><td>Hard cap na iznos jednog tradea, bez obzira na Kelly</td></tr>
+  <tr><td>Kill switch floor</td><td>10% balanasa</td><td>Stop trading ako realni balans padne ispod 10% početnog</td></tr>
+  <tr><td>Rate limit</td><td>10 trades/sat</td><td>U live modu odbija trade ako je u sat sati već 10 naloga</td></tr>
+  <tr><td>Max slippage</td><td>1.5%</td><td>Poništava live trade ako fill cijena premaši ask + 1.5%</td></tr>
+  <tr><td>Early exit</td><td>35% entry cijene</td><td>Izlazi rano i spašava ostatak ako token padne ispod 35% entry cijene</td></tr>
+  <tr><td>Early win</td><td>82% mid cijene</td><td>Zaključava profit ako token naraste na 82%+ i još nema expiry</td></tr>
+  <tr><td>Min window remaining</td><td>60s</td><td>Ne ulazi u trade ako do expiry ostaje manje od minute</td></tr>
+</table>
+
+<div class="box yellow">
+  <strong>Kill switch</strong> — kad se aktivira, svi novi tradeovi su blokirani.
+  Resetira se automatski sljedećeg dana u ponoć, ili ručno komandom <code>/resume</code> na Telegramu.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<h2>7. Blockchain i novac</h2>
+
+<p>
+  Bot nikad ne šalje novac van — samo <strong>potpisuje transakcije</strong> privatnim ključem
+  MetaMask novčanika. Novac ostaje na Polygon blockchainu cijelo vrijeme.
+</p>
+
+<div class="box">
+  <strong>Što treba:</strong>
+  <ul style="margin-top:8px">
+    <li><strong>MetaMask novčanik</strong> — tvoj identitet na blockchainu</li>
+    <li><strong>USDC na Polygon mreži</strong> — valuta za trading (Polymarket prima isključivo USDC)</li>
+    <li><strong>MATIC</strong> — $1–2 za gas naknade (svaka transakcija treba malo MATICa)</li>
+    <li><strong>Jednom odobren USDC spend</strong> — ručno jednom na polymarket.com</li>
+  </ul>
+</div>
+
+<h3>Tijek live tradea</h3>
+<div class="flow">
+  <div class="step">Bot vidi signal</div>
+  <div class="arrow">→</div>
+  <div class="step">Potpiše nalog<br><small>private key</small></div>
+  <div class="arrow">→</div>
+  <div class="step">CLOB prima nalog</div>
+  <div class="arrow">→</div>
+  <div class="step">Polygon transakcija</div>
+  <div class="arrow">→</div>
+  <div class="step">CONFIRMED<br><small>~5–30s</small></div>
+</div>
+
+<p>
+  Bot ne knjižni poziciju dok ne dobije <code>CONFIRMED</code> status s blockchaina.
+  Razlog: ~35% naloga na Polymarket V2 CLOBu se revertira on-chain čak i kad je
+  MATCHED — bot čeka final settlement da izbjegne phantom pozicije.
+</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<h2>8. Telegram kontrola</h2>
+
+<p>Dok bot radi, sve možeš kontrolirati direktno iz Telegrama:</p>
+
+<table>
+  <tr><th>Komanda</th><th>Akcija</th></tr>
+  <tr><td><code>/status</code></td><td>Trenutni balans, P&amp;L, drawdown, win rate, otvorene pozicije</td></tr>
+  <tr><td><code>/kill</code></td><td>Odmah zaustavlja sve tradanje (kill switch)</td></tr>
+  <tr><td><code>/resume</code></td><td>Nastavlja trading nakon kill switcha</td></tr>
+</table>
+
+<p>
+  Bot automatski šalje poruku za svaki otvoreni i zatvoreni trade,
+  te dnevni summary u ponoć.
+  Samo tvoj Telegram ID može slati komande — poruke od tuđih accounta se ignoriraju.
+</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<div class="page-break"></div>
+<h2>9. Sigurnosni slojevi prije live tradinga</h2>
+
+<p>Svaki put kad se bot pokrene u live modu, prolazi <strong>pre-flight check</strong>:</p>
+
+<ol>
+  <li>Je li <code>py-clob-client</code> instaliran i dovoljno nova verzija?</li>
+  <li>Jesu li kontrakti učitani s Polymarketa?</li>
+  <li>Jesu li order bookovi populirani?</li>
+  <li>Su li sve cijene u validnom rasponu (nije expired ili prazan book)?</li>
+  <li>Odgovara li Chainlink oracle?</li>
+  <li>Je li Coinbase feed živ?</li>
+  <li>Koliki je pravi USDC balans na Polygon adresi?</li>
+</ol>
+
+<p>
+  Ako išta od ovoga failuje — bot se <strong>ne pokreće</strong>.
+  Tek nakon što sve prođe, čeka <code>30 sekundi</code> (Ctrl+C za abort)
+  i tek onda počinje tradati.
+</p>
+
+<div class="box yellow">
+  <strong>PID lock</strong> — bot zapisuje svoj process ID u <code>bot.pid</code> fajl.
+  Ako pokušaš pokrenuti drugi bot, dobiva grešku i odmah se zatvara.
+  Sprječava duplo tradanje istim novcem.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<h2>10. Provjera konfiguracije</h2>
+
+<p>Prije pokretanja live moda, pokreni:</p>
+
+<div class="box">
+  <code>python scripts/check_env.py</code>
+</div>
+
+<p>Skripta provjerava:</p>
+<ul>
+  <li>Format private keya i adrese (64 hex znakova)</li>
+  <li>Podudara li se private key s adresom (derivacija)</li>
+  <li>Je li Telegram token validan (getMe API poziv)</li>
+  <li>Može li bot poslati poruku na tvoj chat</li>
+  <li>Pravi USDC balans na Polygon adresi (blockchain RPC poziv)</li>
+  <li>Je li Coinbase WebSocket dostupan</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+<h2>11. Pokretanje</h2>
+
+<table>
+  <tr><th>Komanda</th><th>Što radi</th></tr>
+  <tr><td><code>python main.py</code></td><td>Pokreće bot (paper ili live, ovisno o .env)</td></tr>
+  <tr><td><code>python main.py --stats</code></td><td>Prikazuje sve-time i danas statistike i izlazi</td></tr>
+  <tr><td><code>python main.py --check</code></td><td>Provjera aktivnih kontrakta i izlazi</td></tr>
+  <tr><td><code>python scripts/check_env.py</code></td><td>Validacija .env fajla</td></tr>
+</table>
+
+<h3>.env za live trading</h3>
+<div class="box">
+  <code>
+    LIVE_TRADING_ENABLED=true<br>
+    LIVE_TRADING_CONFIRMED=true<br>
+    LIVE_TRADING_RISK_ACKNOWLEDGED=true<br>
+    POLYGON_PRIVATE_KEY=0x...<br>
+    POLYGON_ADDRESS=0x...<br>
+    TELEGRAM_BOT_TOKEN=123456:ABC...<br>
+    TELEGRAM_CHAT_ID=123456789
+  </code>
+</div>
+
+<hr>
+
+<footer>
+  Polymarket Latency Arbitrage Bot &nbsp;|&nbsp; Windows &nbsp;|&nbsp; Python 3.11+ &nbsp;|&nbsp; Polygon Mainnet
+</footer>
+
+</body>
+</html>

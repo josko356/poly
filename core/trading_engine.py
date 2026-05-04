@@ -1,0 +1,651 @@
+"""
+core/trading_engine.py — Paper and live trading execution.
+
+Paper mode:
+  - Simulates fills at best_ask + configurable slippage.
+  - Tracks virtual P&L in memory and persists to SQLite.
+  - Monitors open positions and resolves them when contracts expire.
+
+Live mode:
+  - Requires all three safety flags + wallet credentials in .env.
+  - Calls PolymarketClient.place_market_order() for real execution.
+  - All order results logged and monitored.
+"""
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Callable, Dict, List, Optional
+
+from .arbitrage_engine import Opportunity
+from .database import Database, TradeRecord
+from .kelly_sizer import KellySizer, SizingResult
+from .polymarket_client import PolymarketClient
+from .risk_manager import RiskManager
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class OpenPosition:
+    trade_id: int
+    opportunity: Opportunity
+    sizing: SizingResult
+    entry_time: float
+    expected_expiry: float   # unix timestamp
+    mode: str                # "paper" | "live"
+
+    # Paper tracking
+    paper_entry_price: float = 0.0
+    paper_shares: float = 0.0
+    paper_usdc_spent: float = 0.0
+
+
+class TradingEngine:
+    """
+    Orchestrates trade execution for paper and live modes.
+    """
+
+    def __init__(
+        self,
+        config,
+        polymarket: PolymarketClient,
+        risk: RiskManager,
+        db: Database,
+        on_trade_open: Optional[Callable] = None,
+        on_trade_close: Optional[Callable] = None,
+    ):
+        self.config = config
+        self.polymarket = polymarket
+        self.risk = risk
+        self.db = db
+        self.on_trade_open = on_trade_open
+        self.on_trade_close = on_trade_close
+
+        self.sizer = KellySizer(config)
+        self._positions: Dict[int, OpenPosition] = {}
+        self._pending_keys: set = set()  # (asset, direction, duration_mins) being opened right now
+        self._monitor_task: Optional[asyncio.Task] = None
+        self._recent_trades: list = []   # all closed trades this session (resets on restart)
+
+    @property
+    def mode(self) -> str:
+        return "live" if self.config.is_live_trading else "paper"
+
+    @property
+    def open_positions(self) -> List[OpenPosition]:
+        return list(self._positions.values())
+
+    @property
+    def recent_trades(self) -> list:
+        """Last 10 trades for dashboard table display."""
+        return self._recent_trades[-10:]
+
+    @property
+    def session_trades(self) -> list:
+        """All closed trades this session — used for win rate calculation."""
+        return self._recent_trades
+
+    # ── Lifecycle ─────────────────────────────────────────────────
+
+    async def start(self):
+        self._monitor_task = asyncio.create_task(self._monitor_positions())
+        logger.info("TradingEngine started in %s mode.", self.mode.upper())
+
+    async def stop(self):
+        if self._monitor_task:
+            self._monitor_task.cancel()
+
+    # ── Main entry point ──────────────────────────────────────────
+
+    async def execute_opportunity(self, opp: Opportunity) -> bool:
+        """
+        Attempt to execute a discovered arbitrage opportunity.
+        Returns True if a trade was opened.
+        """
+        # Pre-trade risk checks
+        can, reason = self.risk.can_trade()
+        if not can:
+            logger.info("Trade blocked: %s", reason)
+            return False
+
+        # Duplicate position guard — one position per asset+direction+duration.
+        # _pending_keys closes the async race: the key is claimed before any await,
+        # so concurrent scans that arrive during the DB insert are also blocked.
+        if not opp.is_bundle:
+            key = (opp.contract.asset, opp.direction, opp.contract.duration_mins)
+            for pos in self._positions.values():
+                if (not pos.opportunity.is_bundle and
+                    pos.opportunity.contract.asset == opp.contract.asset and
+                    pos.opportunity.direction == opp.direction and
+                    pos.opportunity.contract.duration_mins == opp.contract.duration_mins):
+                    logger.debug(
+                        "Duplicate skipped: already have %s %s %dmin open",
+                        opp.contract.asset, opp.direction, opp.contract.duration_mins,
+                    )
+                    return False
+            if key in self._pending_keys:
+                logger.debug("Pending duplicate skipped: %s %s %dmin", *key)
+                return False
+            self._pending_keys.add(key)
+        else:
+            key = (opp.contract.asset, "BUNDLE", opp.contract.duration_mins)
+            for pos in self._positions.values():
+                if (pos.opportunity.is_bundle and
+                    pos.opportunity.contract.asset == opp.contract.asset and
+                    pos.opportunity.contract.duration_mins == opp.contract.duration_mins):
+                    logger.debug(
+                        "Bundle duplicate skipped: already have %s %dmin bundle open",
+                        opp.contract.asset, opp.contract.duration_mins,
+                    )
+                    return False
+            if key in self._pending_keys:
+                logger.debug("Pending bundle duplicate skipped: %s %dmin", opp.contract.asset, opp.contract.duration_mins)
+                return False
+            self._pending_keys.add(key)
+
+        # Position sizing
+        sizing = self.sizer.size(
+            portfolio_balance=self.risk.balance,
+            model_prob=opp.model_prob,
+            entry_price=opp.polymarket_price,
+        )
+
+        if sizing.usdc_amount < self.config.MIN_TRADE_USDC:
+            logger.debug("Trade too small (%.2f USDC) — skipping.", sizing.usdc_amount)
+            self._pending_keys.discard(key)
+            return False
+
+        try:
+            if opp.is_bundle:
+                return await self._open_bundle_trade(opp, sizing)
+            elif self.mode == "paper":
+                return await self._open_paper_trade(opp, sizing)
+            else:
+                return await self._open_live_trade(opp, sizing)
+        finally:
+            self._pending_keys.discard(key)
+
+    # ── Paper trading ──────────────────────────────────────────────
+
+    async def _open_paper_trade(self, opp: Opportunity, sizing: SizingResult) -> bool:
+        # Simulate slippage
+        fill_price = opp.polymarket_price * (1 + self.config.PAPER_FILL_SLIPPAGE)
+        fill_price = min(fill_price, 0.99)
+
+        shares = sizing.usdc_amount / fill_price
+        usdc_spent = shares * fill_price
+
+        # Risk manager deducts from balance
+        self.risk.on_trade_opened(usdc_spent)
+
+        # Persist to DB
+        record = TradeRecord(
+            id=None,
+            timestamp=datetime.utcnow().isoformat(),
+            mode="paper",
+            asset=opp.contract.asset,
+            contract_id=opp.contract.condition_id,
+            contract_question=opp.contract.question,
+            direction=opp.direction,
+            duration_mins=opp.contract.duration_mins,
+            entry_price=fill_price,
+            shares=shares,
+            usdc_spent=usdc_spent,
+            edge=opp.edge,
+            confidence=opp.confidence,
+            kelly_size=sizing.half_kelly,
+            polymarket_prob=opp.polymarket_price,
+            model_prob=opp.model_prob,
+            coinbase_price=opp.coinbase_price,
+            status="open",
+            pnl=None,
+            exit_timestamp=None,
+        )
+        trade_id = await self.db.insert_trade(record)
+
+        # Track in memory
+        expiry = time.time() + (opp.contract.duration_mins * 60)
+        pos = OpenPosition(
+            trade_id=trade_id,
+            opportunity=opp,
+            sizing=sizing,
+            entry_time=time.time(),
+            expected_expiry=expiry,
+            mode="paper",
+            paper_entry_price=fill_price,
+            paper_shares=shares,
+            paper_usdc_spent=usdc_spent,
+        )
+        self._positions[trade_id] = pos
+
+        logger.info(
+            "[PAPER] 📈 Opened %s %s %dmin | price=%.3f | edge=%.1f%% | conf=%.1f%% | $%.2f",
+            opp.contract.asset, opp.direction, opp.contract.duration_mins,
+            fill_price, opp.edge * 100, opp.confidence * 100, usdc_spent,
+        )
+
+        if self.on_trade_open:
+            await self._safe_callback(self.on_trade_open, pos)
+
+        return True
+
+    async def _open_bundle_trade(self, opp: Opportunity, sizing: SizingResult) -> bool:
+        """
+        Bundle arbitrage: buy UP + DOWN tokens at combined cost < $1.
+        Guaranteed profit at expiry regardless of outcome.
+        NOTE: live execution of two-leg bundles is not yet implemented — paper only.
+        """
+        if self.mode == "live":
+            logger.warning(
+                "[LIVE] Bundle arb skipped — live two-leg execution not yet implemented "
+                "(would need two separate CLOB orders). Runs in paper mode only."
+            )
+            return False
+
+        total_cost_per_pair = opp.polymarket_price  # up_ask + down_ask
+        fill_cost = total_cost_per_pair * (1 + self.config.PAPER_FILL_SLIPPAGE)
+        fill_cost = min(fill_cost, 0.99)
+
+        pairs = sizing.usdc_amount / fill_cost
+        usdc_spent = pairs * fill_cost
+        guaranteed_pnl = pairs * opp.edge  # opp.edge = 1 - total_cost - fees
+
+        self.risk.on_trade_opened(usdc_spent)
+
+        record = TradeRecord(
+            id=None,
+            timestamp=datetime.utcnow().isoformat(),
+            mode="paper",
+            asset=opp.contract.asset,
+            contract_id=opp.contract.condition_id,
+            contract_question=f"[BUNDLE] {opp.contract.question}",
+            direction="BUNDLE",
+            duration_mins=opp.contract.duration_mins,
+            entry_price=fill_cost,
+            shares=pairs,
+            usdc_spent=usdc_spent,
+            edge=opp.edge,
+            confidence=1.0,
+            kelly_size=sizing.half_kelly,
+            polymarket_prob=opp.polymarket_price,
+            model_prob=1.0,
+            coinbase_price=opp.coinbase_price,
+            status="open",
+            pnl=None,
+            exit_timestamp=None,
+        )
+        trade_id = await self.db.insert_trade(record)
+
+        expiry = time.time() + (opp.contract.duration_mins * 60)
+        pos = OpenPosition(
+            trade_id=trade_id,
+            opportunity=opp,
+            sizing=sizing,
+            entry_time=time.time(),
+            expected_expiry=expiry,
+            mode="paper",
+            paper_entry_price=fill_cost,
+            paper_shares=pairs,
+            paper_usdc_spent=usdc_spent,
+        )
+        # Store guaranteed pnl for resolution
+        pos._guaranteed_pnl = guaranteed_pnl
+        self._positions[trade_id] = pos
+
+        logger.info(
+            "[PAPER] 🔒 BUNDLE %s %dmin | cost=%.3f | guaranteed_profit=%.1f%% | $%.2f",
+            opp.contract.asset, opp.contract.duration_mins,
+            fill_cost, opp.edge * 100, usdc_spent,
+        )
+
+        if self.on_trade_open:
+            await self._safe_callback(self.on_trade_open, pos)
+
+        return True
+
+    # ── Live trading ──────────────────────────────────────────────
+
+    async def _open_live_trade(self, opp: Opportunity, sizing: SizingResult) -> bool:
+        # Hard cap: never exceed MAX_LIVE_TRADE_USDC per single trade
+        max_cap = getattr(self.config, "MAX_LIVE_TRADE_USDC", 50.0)
+        usdc_to_spend = min(sizing.usdc_amount, max_cap)
+        if usdc_to_spend < sizing.usdc_amount:
+            logger.info(
+                "[LIVE] Kelly sized $%.2f → capped at $%.2f (MAX_LIVE_TRADE_USDC)",
+                sizing.usdc_amount, usdc_to_spend,
+            )
+
+        logger.info(
+            "[LIVE] Placing order: %s %s %dmin | $%.2f",
+            opp.contract.asset, opp.direction,
+            opp.contract.duration_mins, usdc_to_spend,
+        )
+
+        result = await self.polymarket.place_market_order(
+            token_id=opp.contract.token_id,
+            side="buy",
+            usdc_amount=usdc_to_spend,
+        )
+
+        if not result:
+            logger.error("[LIVE] Order placement failed or not confirmed on-chain.")
+            return False
+
+        # Parse fill details from response
+        fill_price = result.get("price", opp.polymarket_price)
+        shares = result.get("size", usdc_to_spend / max(fill_price, 0.001))
+        usdc_spent = shares * fill_price
+
+        # Slippage guard: abort if fill was drastically worse than our model price
+        max_slip = getattr(self.config, "MAX_LIVE_SLIPPAGE_PCT", 0.015)
+        if fill_price > opp.polymarket_price * (1 + max_slip):
+            logger.error(
+                "[LIVE] SLIPPAGE ABORT: fill=%.4f model=%.4f (%.1f%% > %.1f%% limit) — not booking position",
+                fill_price, opp.polymarket_price,
+                (fill_price / opp.polymarket_price - 1) * 100, max_slip * 100,
+            )
+            return False
+
+        self.risk.on_trade_opened(usdc_spent)
+
+        record = TradeRecord(
+            id=None,
+            timestamp=datetime.utcnow().isoformat(),
+            mode="live",
+            asset=opp.contract.asset,
+            contract_id=opp.contract.condition_id,
+            contract_question=opp.contract.question,
+            direction=opp.direction,
+            duration_mins=opp.contract.duration_mins,
+            entry_price=fill_price,
+            shares=shares,
+            usdc_spent=usdc_spent,
+            edge=opp.edge,
+            confidence=opp.confidence,
+            kelly_size=sizing.half_kelly,
+            polymarket_prob=opp.polymarket_price,
+            model_prob=opp.model_prob,
+            coinbase_price=opp.coinbase_price,
+            status="open",
+            pnl=None,
+            exit_timestamp=None,
+        )
+        trade_id = await self.db.insert_trade(record)
+
+        expiry = time.time() + (opp.contract.duration_mins * 60)
+        pos = OpenPosition(
+            trade_id=trade_id,
+            opportunity=opp,
+            sizing=sizing,
+            entry_time=time.time(),
+            expected_expiry=expiry,
+            mode="live",
+            paper_entry_price=fill_price,
+            paper_shares=shares,
+            paper_usdc_spent=usdc_spent,
+        )
+        self._positions[trade_id] = pos
+
+        if self.on_trade_open:
+            await self._safe_callback(self.on_trade_open, pos)
+
+        return True
+
+    # ── Position monitoring ───────────────────────────────────────
+
+    async def _monitor_positions(self):
+        """
+        Periodically check open positions for early exit or expiry.
+        Early exit: if token mid drops below EARLY_EXIT_THRESHOLD × entry price,
+        sell now to recover remaining value instead of riding to zero.
+        """
+        while True:
+            await asyncio.sleep(5)
+            now = time.time()
+            for pos in list(self._positions.values()):
+                # Bundle positions always win at expiry — skip early exit check
+                if pos.opportunity.is_bundle:
+                    if now >= pos.expected_expiry + 30:
+                        await self._resolve_bundle(pos)
+                    continue
+
+                # Early exit / early win checks
+                book = await self.polymarket.get_order_book(pos.opportunity.contract.token_id)
+                if book and book.mid > 0:
+                    # Early WIN: lock profit when token is clearly winning
+                    if book.mid >= self.config.EARLY_WIN_THRESHOLD and now < pos.expected_expiry - 30:
+                        await self._close_position_early_win(pos, book.mid)
+                        continue
+                    # Early EXIT: cut losses when token is clearly losing
+                    threshold = self.config.EARLY_EXIT_THRESHOLD * pos.paper_entry_price
+                    if book.mid < threshold:
+                        await self._close_position_early(pos, book.mid)
+                        continue
+
+                # Expiry check
+                if now >= pos.expected_expiry + 30:
+                    await self._resolve_position(pos)
+
+    async def _close_position_early(self, pos: OpenPosition, current_mid: float):
+        """
+        Exit a losing position before expiry to recover remaining value.
+        Triggered when token mid < EARLY_EXIT_THRESHOLD × entry_price.
+        """
+        exit_price = max(current_mid - self.config.PAPER_FILL_SLIPPAGE, 0.01)
+        proceeds = pos.paper_shares * exit_price
+        pnl = proceeds - pos.paper_usdc_spent
+
+        self.risk.on_trade_closed(proceeds, pnl)
+        self._positions.pop(pos.trade_id, None)
+        await self.db.update_trade_result(pos.trade_id, "exited", pnl)
+
+        self._recent_trades.append({
+            "id": pos.trade_id,
+            "asset": pos.opportunity.contract.asset,
+            "direction": pos.opportunity.direction,
+            "duration": pos.opportunity.contract.duration_mins,
+            "entry_price": pos.paper_entry_price,
+            "pnl": pnl,
+            "status": "exited",
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
+        logger.info(
+            "[PAPER] 🚪 EARLY EXIT %s %s %dmin | entry=%.3f exit=%.3f | P&L=%.2f USDC (saved vs full loss: %.2f)",
+            pos.opportunity.contract.asset, pos.opportunity.direction,
+            pos.opportunity.contract.duration_mins,
+            pos.paper_entry_price, exit_price, pnl,
+            proceeds,
+        )
+
+        if self.on_trade_close:
+            await self._safe_callback(self.on_trade_close, pos, pnl, "exited")
+
+    async def _close_position_early_win(self, pos: OpenPosition, current_mid: float):
+        """Lock in profit early when token price reaches EARLY_WIN_THRESHOLD (default 82%)."""
+        exit_price = min(current_mid - self.config.PAPER_FILL_SLIPPAGE, 0.98)
+        proceeds = pos.paper_shares * exit_price
+        pnl = proceeds - pos.paper_usdc_spent
+
+        self.risk.on_trade_closed(proceeds, pnl)
+        self._positions.pop(pos.trade_id, None)
+        await self.db.update_trade_result(pos.trade_id, "won", pnl)
+
+        self._recent_trades.append({
+            "id": pos.trade_id,
+            "asset": pos.opportunity.contract.asset,
+            "direction": pos.opportunity.direction,
+            "duration": pos.opportunity.contract.duration_mins,
+            "entry_price": pos.paper_entry_price,
+            "pnl": pnl,
+            "status": "won",
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
+        logger.info(
+            "[PAPER] 🏆 EARLY WIN %s %s %dmin | entry=%.3f exit=%.3f | P&L=+%.2f USDC",
+            pos.opportunity.contract.asset, pos.opportunity.direction,
+            pos.opportunity.contract.duration_mins,
+            pos.paper_entry_price, exit_price, pnl,
+        )
+
+        if self.on_trade_close:
+            await self._safe_callback(self.on_trade_close, pos, pnl, "won")
+
+    async def _resolve_bundle(self, pos: OpenPosition):
+        """Bundle arb always wins — one of the two tokens always pays $1."""
+        pnl = getattr(pos, "_guaranteed_pnl", pos.paper_usdc_spent * pos.opportunity.edge)
+        gross_return = pos.paper_usdc_spent + pnl
+
+        self.risk.on_trade_closed(gross_return, pnl)
+        self._positions.pop(pos.trade_id, None)
+        await self.db.update_trade_result(pos.trade_id, "won", pnl)
+
+        self._recent_trades.append({
+            "id": pos.trade_id,
+            "asset": pos.opportunity.contract.asset,
+            "direction": "BUNDLE",
+            "duration": pos.opportunity.contract.duration_mins,
+            "entry_price": pos.paper_entry_price,
+            "pnl": pnl,
+            "status": "won",
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
+        logger.info(
+            "[PAPER] ✅ BUNDLE WON %s %dmin | P&L=+%.2f USDC",
+            pos.opportunity.contract.asset, pos.opportunity.contract.duration_mins, pnl,
+        )
+
+        if self.on_trade_close:
+            await self._safe_callback(self.on_trade_close, pos, pnl, "won")
+
+    async def _resolve_position(self, pos: OpenPosition):
+        """Settle an expired position."""
+        try:
+            if pos.mode == "paper":
+                await self._resolve_paper(pos)
+            else:
+                await self._resolve_live(pos)
+        except Exception as exc:
+            logger.error("Position resolution error for trade %d: %s", pos.trade_id, exc)
+            self._positions.pop(pos.trade_id, None)
+
+    async def _resolve_paper(self, pos: OpenPosition):
+        """
+        Simulate paper trade resolution.
+        We check the current Polymarket price for the token.
+        If it's ≥ 0.95, we treat it as a WIN (settled YES).
+        If it's ≤ 0.05, it's a LOSS (settled NO).
+        Otherwise, we check current price and determine win/loss from there.
+        """
+        token_id = pos.opportunity.contract.token_id
+        book = await self.polymarket.get_order_book(token_id)
+
+        # Heuristic settlement: settled markets show price near 0 or 1
+        if book and book.mid >= 0.95:
+            won = True
+        elif book and book.mid <= 0.05:
+            won = False
+        else:
+            # Contract not yet settled — check again later
+            # Extend the expected expiry to check again in 30s
+            pos.expected_expiry = time.time() + 30
+            self._positions[pos.trade_id] = pos
+            return
+
+        if won:
+            # Win: receive $1 per share. Net profit = shares*(1-entry). Gross = shares*1.
+            pnl = pos.paper_shares * (1.0 - pos.paper_entry_price)
+            gross_return = pos.paper_shares  # full $1/share payout; stake was already removed
+            status = "won"
+        else:
+            # Loss: stake already deducted at open, nothing to return
+            pnl = -pos.paper_usdc_spent
+            gross_return = 0.0
+            status = "lost"
+
+        self.risk.on_trade_closed(gross_return, pnl)
+        self._positions.pop(pos.trade_id, None)
+
+        await self.db.update_trade_result(pos.trade_id, status, pnl)
+
+        self._recent_trades.append({
+            "id": pos.trade_id,
+            "asset": pos.opportunity.contract.asset,
+            "direction": pos.opportunity.direction,
+            "duration": pos.opportunity.contract.duration_mins,
+            "entry_price": pos.paper_entry_price,
+            "pnl": pnl,
+            "status": status,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
+        logger.info(
+            "[PAPER] %s %s %s %dmin | P&L=%.2f USDC",
+            "✅ WON" if won else "❌ LOST",
+            pos.opportunity.contract.asset,
+            pos.opportunity.direction,
+            pos.opportunity.contract.duration_mins,
+            pnl,
+        )
+
+        if self.on_trade_close:
+            await self._safe_callback(self.on_trade_close, pos, pnl, status)
+
+    async def _resolve_live(self, pos: OpenPosition):
+        """Query CLOB for live settlement — simplified version."""
+        token_id = pos.opportunity.contract.token_id
+        book = await self.polymarket.get_order_book(token_id)
+
+        if not book:
+            pos.expected_expiry = time.time() + 60
+            self._positions[pos.trade_id] = pos
+            return
+
+        if book.mid >= 0.95:
+            won = True
+        elif book.mid <= 0.05:
+            won = False
+        else:
+            pos.expected_expiry = time.time() + 30
+            self._positions[pos.trade_id] = pos
+            return
+
+        pnl = (pos.paper_shares * (1.0 - pos.paper_entry_price)) if won else (-pos.paper_usdc_spent)
+        gross_return = pos.paper_shares if won else 0.0
+        status = "won" if won else "lost"
+
+        self.risk.on_trade_closed(gross_return, pnl)
+        self._positions.pop(pos.trade_id, None)
+        await self.db.update_trade_result(pos.trade_id, status, pnl)
+
+        self._recent_trades.append({
+            "id": pos.trade_id,
+            "asset": pos.opportunity.contract.asset,
+            "direction": pos.opportunity.direction,
+            "duration": pos.opportunity.contract.duration_mins,
+            "entry_price": pos.paper_entry_price,
+            "pnl": pnl,
+            "status": status,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
+        logger.info("[LIVE] %s P&L=%.2f", "✅ WON" if won else "❌ LOST", pnl)
+
+        if self.on_trade_close:
+            await self._safe_callback(self.on_trade_close, pos, pnl, status)
+
+    # ── Helpers ───────────────────────────────────────────────────
+
+    async def _safe_callback(self, cb, *args):
+        try:
+            if asyncio.iscoroutinefunction(cb):
+                await cb(*args)
+            else:
+                cb(*args)
+        except Exception as exc:
+            logger.error("Callback error: %s", exc)
