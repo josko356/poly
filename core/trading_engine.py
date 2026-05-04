@@ -66,9 +66,9 @@ class TradingEngine:
 
         self.sizer = KellySizer(config)
         self._positions: Dict[int, OpenPosition] = {}
-        self._pending_keys: set = set()  # (asset, direction, duration_mins) being opened right now
+        self._pending_keys: set = set()  # (asset, smjer, trajanje_min) koji se trenutno otvaraju
         self._monitor_task: Optional[asyncio.Task] = None
-        self._recent_trades: list = []   # all closed trades this session (resets on restart)
+        self._recent_trades: list = []   # svi zatvoreni tradovi ove sesije (resetira se pri restartu)
 
     @property
     def mode(self) -> str:
@@ -80,15 +80,15 @@ class TradingEngine:
 
     @property
     def recent_trades(self) -> list:
-        """Last 10 trades for dashboard table display."""
+        """Zadnjih 10 tradova za prikaz u dashboardu."""
         return self._recent_trades[-10:]
 
     @property
     def session_trades(self) -> list:
-        """All closed trades this session — used for win rate calculation."""
+        """Svi zatvoreni tradovi ove sesije — koristi se za izracun win ratea."""
         return self._recent_trades
 
-    # ── Lifecycle ─────────────────────────────────────────────────
+    # ── Zivotni ciklus ────────────────────────────────────────────
 
     async def start(self):
         self._monitor_task = asyncio.create_task(self._monitor_positions())
@@ -98,22 +98,19 @@ class TradingEngine:
         if self._monitor_task:
             self._monitor_task.cancel()
 
-    # ── Main entry point ──────────────────────────────────────────
+    # ── Glavna ulazna tocka ───────────────────────────────────────
 
     async def execute_opportunity(self, opp: Opportunity) -> bool:
-        """
-        Attempt to execute a discovered arbitrage opportunity.
-        Returns True if a trade was opened.
-        """
+        """Pokusaj izvrsiti otkrivenu arbitraznu priliku. Vraca True ako je trade otvoren."""
         # Pre-trade risk checks
         can, reason = self.risk.can_trade()
         if not can:
             logger.info("Trade blocked: %s", reason)
             return False
 
-        # Duplicate position guard — one position per asset+direction+duration.
-        # _pending_keys closes the async race: the key is claimed before any await,
-        # so concurrent scans that arrive during the DB insert are also blocked.
+        # Zastita od duplikata — jedna pozicija po asset+smjer+trajanje.
+        # _pending_keys zakljucava kljuc odmah, prije svakog awaita,
+        # pa istovremeni skenovi koji stignu za vrijeme DB inserta takodje budu blokirani.
         if not opp.is_bundle:
             key = (opp.contract.asset, opp.direction, opp.contract.duration_mins)
             for pos in self._positions.values():
@@ -146,7 +143,7 @@ class TradingEngine:
                 return False
             self._pending_keys.add(key)
 
-        # Position sizing
+        # Odredivanje velicine pozicije
         sizing = self.sizer.size(
             portfolio_balance=self.risk.balance,
             model_prob=opp.model_prob,
@@ -168,20 +165,20 @@ class TradingEngine:
         finally:
             self._pending_keys.discard(key)
 
-    # ── Paper trading ──────────────────────────────────────────────
+    # ── Paper trading ─────────────────────────────────────────────
 
     async def _open_paper_trade(self, opp: Opportunity, sizing: SizingResult) -> bool:
-        # Simulate slippage
+        # Simulacija slippagea
         fill_price = opp.polymarket_price * (1 + self.config.PAPER_FILL_SLIPPAGE)
         fill_price = min(fill_price, 0.99)
 
         shares = sizing.usdc_amount / fill_price
         usdc_spent = shares * fill_price
 
-        # Risk manager deducts from balance
+        # Risk manager oduzima od balansa
         self.risk.on_trade_opened(usdc_spent)
 
-        # Persist to DB
+        # Spremi u bazu
         record = TradeRecord(
             id=None,
             timestamp=datetime.utcnow().isoformat(),
@@ -206,7 +203,7 @@ class TradingEngine:
         )
         trade_id = await self.db.insert_trade(record)
 
-        # Track in memory
+        # Prati u memoriji
         expiry = time.time() + (opp.contract.duration_mins * 60)
         pos = OpenPosition(
             trade_id=trade_id,
@@ -222,7 +219,7 @@ class TradingEngine:
         self._positions[trade_id] = pos
 
         logger.info(
-            "[PAPER] 📈 Opened %s %s %dmin | price=%.3f | edge=%.1f%% | conf=%.1f%% | $%.2f",
+            "[PAPER] Otvoren %s %s %dmin | price=%.3f | edge=%.1f%% | conf=%.1f%% | $%.2f",
             opp.contract.asset, opp.direction, opp.contract.duration_mins,
             fill_price, opp.edge * 100, opp.confidence * 100, usdc_spent,
         )
@@ -233,10 +230,9 @@ class TradingEngine:
         return True
 
     async def _open_bundle_trade(self, opp: Opportunity, sizing: SizingResult) -> bool:
-        """
-        Bundle arbitrage: buy UP + DOWN tokens at combined cost < $1.
-        Guaranteed profit at expiry regardless of outcome.
-        NOTE: live execution of two-leg bundles is not yet implemented — paper only.
+        """Bundle arbitraza: kupovina UP + DOWN tokena po ukupnoj cijeni < $1.
+        Garantirani profit pri isteku bez obzira na ishod.
+        Napomena: live izvrsavanje nije implementirano — samo paper.
         """
         if self.mode == "live":
             logger.warning(
@@ -291,12 +287,12 @@ class TradingEngine:
             paper_shares=pairs,
             paper_usdc_spent=usdc_spent,
         )
-        # Store guaranteed pnl for resolution
+        # Spremi zagarantovani PnL za zatvaranje
         pos._guaranteed_pnl = guaranteed_pnl
         self._positions[trade_id] = pos
 
         logger.info(
-            "[PAPER] 🔒 BUNDLE %s %dmin | cost=%.3f | guaranteed_profit=%.1f%% | $%.2f",
+            "[PAPER] BUNDLE %s %dmin | cost=%.3f | guaranteed_profit=%.1f%% | $%.2f",
             opp.contract.asset, opp.contract.duration_mins,
             fill_cost, opp.edge * 100, usdc_spent,
         )
@@ -309,7 +305,7 @@ class TradingEngine:
     # ── Live trading ──────────────────────────────────────────────
 
     async def _open_live_trade(self, opp: Opportunity, sizing: SizingResult) -> bool:
-        # Hard cap: never exceed MAX_LIVE_TRADE_USDC per single trade
+        # Tvrdi limit: nikad vise od MAX_LIVE_TRADE_USDC po tradu
         max_cap = getattr(self.config, "MAX_LIVE_TRADE_USDC", 50.0)
         usdc_to_spend = min(sizing.usdc_amount, max_cap)
         if usdc_to_spend < sizing.usdc_amount:
@@ -339,7 +335,7 @@ class TradingEngine:
         shares = result.get("size", usdc_to_spend / max(fill_price, 0.001))
         usdc_spent = shares * fill_price
 
-        # Slippage guard: abort if fill was drastically worse than our model price
+        # Zastita od slippagea: odbaci ako je fill cijena drasticno losija od modelirane
         max_slip = getattr(self.config, "MAX_LIVE_SLIPPAGE_PCT", 0.015)
         if fill_price > opp.polymarket_price * (1 + max_slip):
             logger.error(
@@ -394,46 +390,39 @@ class TradingEngine:
 
         return True
 
-    # ── Position monitoring ───────────────────────────────────────
+    # ── Pracenje pozicija ─────────────────────────────────────────
 
     async def _monitor_positions(self):
-        """
-        Periodically check open positions for early exit or expiry.
-        Early exit: if token mid drops below EARLY_EXIT_THRESHOLD × entry price,
-        sell now to recover remaining value instead of riding to zero.
-        """
+        """Periodicna provjera otvorenih pozicija za rani izlaz ili istek."""
         while True:
             await asyncio.sleep(5)
             now = time.time()
             for pos in list(self._positions.values()):
-                # Bundle positions always win at expiry — skip early exit check
+                # Bundle pozicije uvijek pobijede pri isteku — preskoci provjeru ranog izlaza
                 if pos.opportunity.is_bundle:
                     if now >= pos.expected_expiry + 30:
                         await self._resolve_bundle(pos)
                     continue
 
-                # Early exit / early win checks
+                # Provjere ranog izlaza / rane pobjede
                 book = await self.polymarket.get_order_book(pos.opportunity.contract.token_id)
                 if book and book.mid > 0:
-                    # Early WIN: lock profit when token is clearly winning
+                    # Rana pobjeda: zakljucaj profit kad token jasno dobiva
                     if book.mid >= self.config.EARLY_WIN_THRESHOLD and now < pos.expected_expiry - 30:
                         await self._close_position_early_win(pos, book.mid)
                         continue
-                    # Early EXIT: cut losses when token is clearly losing
+                    # Rani izlaz: smanji gubitke kad token jasno gubi
                     threshold = self.config.EARLY_EXIT_THRESHOLD * pos.paper_entry_price
                     if book.mid < threshold:
                         await self._close_position_early(pos, book.mid)
                         continue
 
-                # Expiry check
+                # Provjera isteka
                 if now >= pos.expected_expiry + 30:
                     await self._resolve_position(pos)
 
     async def _close_position_early(self, pos: OpenPosition, current_mid: float):
-        """
-        Exit a losing position before expiry to recover remaining value.
-        Triggered when token mid < EARLY_EXIT_THRESHOLD × entry_price.
-        """
+        """Izlaz iz gubitnicke pozicije prije isteka radi povrata preostale vrijednosti."""
         exit_price = max(current_mid - self.config.PAPER_FILL_SLIPPAGE, 0.01)
         proceeds = pos.paper_shares * exit_price
         pnl = proceeds - pos.paper_usdc_spent
@@ -454,7 +443,7 @@ class TradingEngine:
         })
 
         logger.info(
-            "[PAPER] 🚪 EARLY EXIT %s %s %dmin | entry=%.3f exit=%.3f | P&L=%.2f USDC (saved vs full loss: %.2f)",
+            "[PAPER] PRIJEVREMENI IZLAZ %s %s %dmin | entry=%.3f exit=%.3f | P&L=%.2f USDC (saved vs full loss: %.2f)",
             pos.opportunity.contract.asset, pos.opportunity.direction,
             pos.opportunity.contract.duration_mins,
             pos.paper_entry_price, exit_price, pnl,
@@ -465,7 +454,7 @@ class TradingEngine:
             await self._safe_callback(self.on_trade_close, pos, pnl, "exited")
 
     async def _close_position_early_win(self, pos: OpenPosition, current_mid: float):
-        """Lock in profit early when token price reaches EARLY_WIN_THRESHOLD (default 82%)."""
+        """Zakljucaj profit ranom prodajom kad token dostigne EARLY_WIN_THRESHOLD."""
         exit_price = min(current_mid - self.config.PAPER_FILL_SLIPPAGE, 0.98)
         proceeds = pos.paper_shares * exit_price
         pnl = proceeds - pos.paper_usdc_spent
@@ -486,7 +475,7 @@ class TradingEngine:
         })
 
         logger.info(
-            "[PAPER] 🏆 EARLY WIN %s %s %dmin | entry=%.3f exit=%.3f | P&L=+%.2f USDC",
+            "[PAPER] PRIJEVREMENA POBJEDA %s %s %dmin | entry=%.3f exit=%.3f | P&L=+%.2f USDC",
             pos.opportunity.contract.asset, pos.opportunity.direction,
             pos.opportunity.contract.duration_mins,
             pos.paper_entry_price, exit_price, pnl,
@@ -496,7 +485,7 @@ class TradingEngine:
             await self._safe_callback(self.on_trade_close, pos, pnl, "won")
 
     async def _resolve_bundle(self, pos: OpenPosition):
-        """Bundle arb always wins — one of the two tokens always pays $1."""
+        """Bundle arb uvijek pobijedi — jedan od dva tokena uvijek isplati $1."""
         pnl = getattr(pos, "_guaranteed_pnl", pos.paper_usdc_spent * pos.opportunity.edge)
         gross_return = pos.paper_usdc_spent + pnl
 
@@ -516,7 +505,7 @@ class TradingEngine:
         })
 
         logger.info(
-            "[PAPER] ✅ BUNDLE WON %s %dmin | P&L=+%.2f USDC",
+            "[PAPER] BUNDLE DOBIVEN %s %dmin | P&L=+%.2f USDC",
             pos.opportunity.contract.asset, pos.opportunity.contract.duration_mins, pnl,
         )
 
@@ -524,7 +513,7 @@ class TradingEngine:
             await self._safe_callback(self.on_trade_close, pos, pnl, "won")
 
     async def _resolve_position(self, pos: OpenPosition):
-        """Settle an expired position."""
+        """Zatvori isteklu poziciju."""
         try:
             if pos.mode == "paper":
                 await self._resolve_paper(pos)
@@ -535,35 +524,29 @@ class TradingEngine:
             self._positions.pop(pos.trade_id, None)
 
     async def _resolve_paper(self, pos: OpenPosition):
-        """
-        Simulate paper trade resolution.
-        We check the current Polymarket price for the token.
-        If it's ≥ 0.95, we treat it as a WIN (settled YES).
-        If it's ≤ 0.05, it's a LOSS (settled NO).
-        Otherwise, we check current price and determine win/loss from there.
-        """
+        """Simulacija zatvaranja paper trada. Provjeravamo Polymarket cijenu tokena — >= 0.95 je pobjeda, <= 0.05 je gubitak."""
         token_id = pos.opportunity.contract.token_id
         book = await self.polymarket.get_order_book(token_id)
 
-        # Heuristic settlement: settled markets show price near 0 or 1
+        # Namireni ugovori imaju cijenu blizu 0 ili 1
         if book and book.mid >= 0.95:
             won = True
         elif book and book.mid <= 0.05:
             won = False
         else:
-            # Contract not yet settled — check again later
-            # Extend the expected expiry to check again in 30s
+            # Ugovor jos nije namiren — provjeri opet
+            # Produzi ocekivani rok za jos 30s
             pos.expected_expiry = time.time() + 30
             self._positions[pos.trade_id] = pos
             return
 
         if won:
-            # Win: receive $1 per share. Net profit = shares*(1-entry). Gross = shares*1.
+            # Pobjeda: $1 po dionici. Neto profit = dionice*(1-ulazna_cijena).
             pnl = pos.paper_shares * (1.0 - pos.paper_entry_price)
-            gross_return = pos.paper_shares  # full $1/share payout; stake was already removed
+            gross_return = pos.paper_shares
             status = "won"
         else:
-            # Loss: stake already deducted at open, nothing to return
+            # Gubitak: ulozeni iznos vec oduzet pri otvaranju, nema povrata
             pnl = -pos.paper_usdc_spent
             gross_return = 0.0
             status = "lost"
@@ -586,7 +569,7 @@ class TradingEngine:
 
         logger.info(
             "[PAPER] %s %s %s %dmin | P&L=%.2f USDC",
-            "✅ WON" if won else "❌ LOST",
+            "DOBIVEN" if won else "IZGUBLJEN",
             pos.opportunity.contract.asset,
             pos.opportunity.direction,
             pos.opportunity.contract.duration_mins,
@@ -597,7 +580,7 @@ class TradingEngine:
             await self._safe_callback(self.on_trade_close, pos, pnl, status)
 
     async def _resolve_live(self, pos: OpenPosition):
-        """Query CLOB for live settlement — simplified version."""
+        """Provjera live namirenja putem CLOB-a."""
         token_id = pos.opportunity.contract.token_id
         book = await self.polymarket.get_order_book(token_id)
 
@@ -634,12 +617,12 @@ class TradingEngine:
             "timestamp": datetime.utcnow().isoformat(),
         })
 
-        logger.info("[LIVE] %s P&L=%.2f", "✅ WON" if won else "❌ LOST", pnl)
+        logger.info("[LIVE] %s P&L=%.2f", "DOBIVEN" if won else "IZGUBLJEN", pnl)
 
         if self.on_trade_close:
             await self._safe_callback(self.on_trade_close, pos, pnl, status)
 
-    # ── Helpers ───────────────────────────────────────────────────
+    # ── Pomocne metode ────────────────────────────────────────────
 
     async def _safe_callback(self, cb, *args):
         try:

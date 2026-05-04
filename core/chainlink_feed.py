@@ -1,11 +1,11 @@
 """
-core/chainlink_feed.py — Chainlink oracle price reader via Polygon RPC.
+core/chainlink_feed.py — Chainlink oracle citac cijena putem Polygon RPC-a.
 
-Polymarket settles contracts using Chainlink oracle prices, NOT Coinbase prices.
-Reading oracle prices directly means:
-  1. price_to_beat is set from the exact oracle price at window open
-  2. The probability model uses the actual settlement reference, not a proxy
-  3. Divergence between Coinbase and Chainlink is detected and handled
+Polymarket namiruje ugovore koristeci Chainlink oracle cijene, NE Coinbase cijene.
+Direktno citanje oracle cijena znaci:
+  1. price_to_beat se postavlja iz tocne oracle cijene na otvaranju prozora
+  2. Model vjerojatnosti koristi stvarnu referentnu vrijednost za namirenje, a ne proxy
+  3. Divergencija izmedju Coinbasea i Chainlinka se detektira i obradjuje
 """
 
 import asyncio
@@ -18,9 +18,9 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 POLYGON_RPCS = [
-    "https://polygon-bor-rpc.publicnode.com",   # free, no key needed
-    "https://1rpc.io/matic",                     # free, privacy-focused
-    "https://rpc-mainnet.matic.quiknode.pro",    # free public tier
+    "https://polygon-bor-rpc.publicnode.com",   # besplatno, bez kljuca
+    "https://1rpc.io/matic",                     # besplatno, privatnost-fokusirano
+    "https://rpc-mainnet.matic.quiknode.pro",    # besplatni javni tier
 ]
 
 CHAINLINK_FEEDS = {
@@ -30,23 +30,23 @@ CHAINLINK_FEEDS = {
     "XRP": "0x785ba89291f676b5386652eB12b30cF361020694",
 }
 
-LATEST_ROUND_DATA = "0xfeaf968c"   # latestRoundData() function selector
-POLL_INTERVAL     = 5.0            # seconds between full poll cycles
-STALENESS_LIMIT   = 30.0           # seconds before a cached price is considered stale
-SANITY_TOLERANCE  = 0.25           # max allowed divergence from Coinbase (25%)
+LATEST_ROUND_DATA = "0xfeaf968c"   # latestRoundData() selektor funkcije
+POLL_INTERVAL     = 5.0            # sekunde izmedju punih ciklusa ankete
+STALENESS_LIMIT   = 30.0           # sekunde prije nego se predmemorirana cijena smatra zastarjelom
+SANITY_TOLERANCE  = 0.25           # maksimalno dopusteno odstupanje od Coinbasea (25%)
 TIMEOUT = aiohttp.ClientTimeout(total=4)
 
 
 class ChainlinkFeed:
     """
-    Polls Chainlink aggregator contracts on Polygon for the oracle prices
-    that Polymarket uses to settle UP/DOWN contracts.
+    Anketira Chainlink aggregator ugovore na Polygonu radi oracle cijena
+    koje Polymarket koristi za namirenje UP/DOWN ugovora.
 
-    Usage:
+    Upotreba:
         feed = ChainlinkFeed(config.ASSETS)
         await feed.start()
-        price = feed.get_price("BTC")          # returns float or None
-        price = feed.get_validated("BTC", coinbase_price=95000)  # sanity-checked
+        price = feed.get_price("BTC")          # vraca float ili None
+        price = feed.get_validated("BTC", coinbase_price=95000)  # provjera ispravnosti
     """
 
     def __init__(self, assets: list):
@@ -71,15 +71,15 @@ class ChainlinkFeed:
     # ── Public API ────────────────────────────────────────────────
 
     def get_price(self, asset: str) -> Optional[float]:
-        """Latest oracle price, or None if stale/unavailable."""
+        """Najnovija oracle cijena, ili None ako je zastarjela/nedostupna."""
         if time.time() - self._timestamps.get(asset, 0) > STALENESS_LIMIT:
             return None
         return self._prices.get(asset)
 
     def get_validated(self, asset: str, coinbase_price: float) -> Optional[float]:
         """
-        Returns oracle price only if it's within SANITY_TOLERANCE of coinbase_price.
-        Falls back to None if prices diverge too much (likely wrong address or stale oracle).
+        Vraca oracle cijenu samo ako je unutar SANITY_TOLERANCE od coinbase_price.
+        Pada na None ako se cijene previse razilaze (vjerojatno pogresna adresa ili zastarjeli oracle).
         """
         oracle = self.get_price(asset)
         if oracle is None or coinbase_price <= 0:
@@ -96,7 +96,7 @@ class ChainlinkFeed:
     # ── Background poll ───────────────────────────────────────────
 
     async def _poll_loop(self):
-        await asyncio.sleep(2.0)  # let session stabilise
+        await asyncio.sleep(2.0)  # pricekaj da se sesija stabilizira
         while True:
             for asset in self._assets:
                 if asset not in CHAINLINK_FEEDS:
@@ -129,22 +129,22 @@ class ChainlinkFeed:
                 result = data.get("result", "")
                 if not result or result == "0x":
                     return None
-                # Response: 5 × 32-byte fields (plus 0x prefix = 322 hex chars)
-                # Fields: (roundId, answer, startedAt, updatedAt, answeredInRound)
+                # Odgovor: 5 × 32-bajtnih polja (plus 0x prefiks = 322 hex znakova)
+                # Polja: (roundId, answer, startedAt, updatedAt, answeredInRound)
                 clean = result[2:]
                 if len(clean) < 320:
                     return None
-                answer_hex = clean[64:128]   # second field = answer
+                answer_hex = clean[64:128]   # drugo polje = answer
                 answer = int(answer_hex, 16)
-                # int256 two's complement: negative prices are theoretically impossible
-                # but a buggy oracle can return them — treat as invalid
+                # int256 komplement dvojke: negativne cijene su teorijski nemoguce
+                # ali gresan oracle ih moze vratiti — tretirati kao nevazecu vrijednost
                 if answer > (1 << 255):
                     answer -= (1 << 256)
                 if answer <= 0:
                     return None
-                # Chainlink USD feeds use 8 decimal places
+                # Chainlink USD feedovi koriste 8 decimalnih mjesta
                 return answer / 1e8
         except Exception as exc:
             logger.debug("Chainlink RPC error %s (%s): %s", asset, rpc, exc)
-            self._rpc_index += 1  # rotate RPC on failure
+            self._rpc_index += 1  # rotacija RPC-a pri gresci
             return None

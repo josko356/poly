@@ -1,11 +1,11 @@
 """
-core/polymarket_client.py — Polymarket CLOB API client.
+core/polymarket_client.py — Polymarket CLOB API klijent.
 
-Responsibilities:
-  1. Auto-discover active BTC/ETH 5-min and 15-min UP/DOWN contracts
-  2. Fetch live order books for those contracts
-  3. Place and cancel orders (live mode only)
-  4. Refresh contract list periodically (markets expire and new ones open)
+Odgovornosti:
+  1. Automatski otkriva aktivne BTC/ETH 5-min i 15-min UP/DOWN ugovore
+  2. Dohvaca live order bookove za te ugovore
+  3. Postavlja i otkazuje naloge (samo u live modu)
+  4. Periodicno osvjezava listu ugovora (trzista istjecu i otvaraju se nova)
 """
 
 import asyncio
@@ -24,17 +24,17 @@ CLOB_URL  = "https://clob.polymarket.com"
 WS_URL    = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=5)
 WS_TIMEOUT      = aiohttp.ClientTimeout(total=None, connect=10)
-RATE_LIMIT_DELAY = 0.05  # 50ms between requests (~20 req/s)
-BOOK_REFRESH_INTERVAL = 5.0   # REST fallback interval when WebSocket is active
-BOOK_CACHE_TTL = 3.0          # seconds before cached book is considered stale
-BOOK_BATCH_SIZE = 8           # concurrent REST fetches per batch
+RATE_LIMIT_DELAY = 0.05  # 50ms izmedju zahtjeva (~20 req/s)
+BOOK_REFRESH_INTERVAL = 5.0   # REST fallback interval kada je WebSocket aktivan
+BOOK_CACHE_TTL = 3.0          # sekunde prije nego sto se cached order book smatra zastarjelim
+BOOK_BATCH_SIZE = 8           # istovremeni REST dohvati po batchu
 
-# Assets to monitor (slug prefix → Coinbase asset name)
-# Durations come from config.UPDOWN_DURATIONS (default: [5, 15])
+# Asseti za pracenje (prefiks sluga → naziv asseta na Coinbaseu)
+# Trajanja dolaze iz config.UPDOWN_DURATIONS (zadano: [5, 15])
 UPDOWN_ASSETS = {"btc": "BTC", "eth": "ETH", "sol": "SOL", "xrp": "XRP"}
 
 
-# ── Data models ───────────────────────────────────────────────────────────────
+# ── Modeli podataka ───────────────────────────────────────────────────────────
 
 @dataclass
 class Contract:
@@ -43,35 +43,35 @@ class Contract:
     asset: str          # "BTC" | "ETH"
     direction: str      # "UP" | "DOWN"
     duration_mins: int  # 5 | 15
-    token_id: str       # the specific YES/NO token ID
+    token_id: str       # specificni YES/NO token ID
     end_date_iso: str
     active: bool = True
     last_price: float = 0.5
     yes_token_id: str = ""
     no_token_id: str = ""
-    window_start: int = 0       # unix timestamp of window open (from slug)
-    price_to_beat: float = 0.0  # Chainlink price at window open; set on first scan
+    window_start: int = 0       # unix timestamp otvaranja prozora (iz sluga)
+    price_to_beat: float = 0.0  # Chainlink cijena pri otvaranju prozora; postavlja se pri prvom skeniranju
 
 
 @dataclass
 class OrderBook:
     token_id: str
-    best_bid: float     # highest price someone will buy at (= "YES" price if selling)
-    best_ask: float     # lowest price someone will sell at (= what we pay)
+    best_bid: float     # najvisa cijena po kojoj netko kupuje (= cijena "YES" ako prodajemo)
+    best_ask: float     # najniza cijena po kojoj netko prodaje (= sto mi placamo)
     mid: float
     spread: float
-    best_ask_size: float = 0.0   # shares available at best ask (liquidity depth)
+    best_ask_size: float = 0.0   # dionice dostupne po best ask (dubina likvidnosti)
     timestamp: float = field(default_factory=time.time)
 
 
-# ── Client ────────────────────────────────────────────────────────────────────
+# ── Klijent ───────────────────────────────────────────────────────────────────
 
 class PolymarketClient:
     """
-    Async Polymarket client.
-    - Polls Gamma API for active contracts every `refresh_interval` seconds.
-    - Fetches CLOB order books on demand.
-    - Wraps py-clob-client for order placement in live mode.
+    Asinkroni Polymarket klijent.
+    - Dohvaca aktivne ugovore s Gamma API-ja svakih `refresh_interval` sekundi.
+    - Dohvaca CLOB order bookove na zahtjev.
+    - Omata py-clob-client za postavljanje naloga u live modu.
     """
 
     def __init__(
@@ -88,17 +88,17 @@ class PolymarketClient:
         self._refresh_task: Optional[asyncio.Task] = None
         self._book_refresh_task: Optional[asyncio.Task] = None
         self._ws_task: Optional[asyncio.Task] = None
-        self._ws = None                              # active aiohttp WebSocket connection
-        self._ws_subscribed: set = set()             # token_ids currently subscribed over WS
-        self._clob_client = None  # set up in start() if live mode
+        self._ws = None                              # aktivna aiohttp WebSocket konekcija
+        self._ws_subscribed: set = set()             # token_ids trenutno pretplaceni putem WS
+        self._clob_client = None  # postavlja se u start() ako je live mod
         self._last_request = 0.0
         self._rate_lock = asyncio.Lock()
 
-    # ── Lifecycle ─────────────────────────────────────────────────
+    # ── Zivotni ciklus ────────────────────────────────────────────
 
     async def start(self):
         self._session = aiohttp.ClientSession(timeout=REQUEST_TIMEOUT)
-        await self._refresh_contracts()  # initial load
+        await self._refresh_contracts()  # pocetno ucitavanje
         self._refresh_task = asyncio.create_task(self._refresh_loop())
         self._book_refresh_task = asyncio.create_task(self._book_refresh_loop())
         self._ws_task = asyncio.create_task(self._ws_book_loop())
@@ -121,7 +121,7 @@ class PolymarketClient:
         if self._session:
             await self._session.close()
 
-    # ── Public API ────────────────────────────────────────────────
+    # ── Javni API ─────────────────────────────────────────────────
 
     def get_contracts(self) -> List[Contract]:
         return list(self._contracts.values())
@@ -130,14 +130,14 @@ class PolymarketClient:
         return self._contracts.get(condition_id)
 
     async def get_order_book(self, token_id: str) -> Optional[OrderBook]:
-        """Return cached order book immediately; fall back to live fetch if stale."""
+        """Vraci cached order book odmah; poziva live fetch ako je zastario."""
         cached = self._order_books.get(token_id)
         if cached and (time.time() - cached.timestamp) < BOOK_CACHE_TTL:
             return cached
         return await self._fetch_book(token_id)
 
     async def _fetch_book(self, token_id: str) -> Optional[OrderBook]:
-        """Live fetch with rate limiting — used as fallback and by background loop."""
+        """Live fetch s ogranicenjem brzine — koristi se kao fallback i u pozadinskoj petlji."""
         await self._rate_limit()
         try:
             async with self._session.get(
@@ -153,10 +153,10 @@ class PolymarketClient:
 
     async def _book_refresh_loop(self):
         """
-        Continuously refreshes all order books via HTTP polling every 1.5s.
-        Keeps the cache fresh so get_order_book() never blocks on the hot path.
+        Kontinuirano osvjezava sve order bookove putem HTTP pollinga svakih 1.5s.
+        Odrzava cache svjezim kako get_order_book() nikad ne blokira na vrucoj putanji.
         """
-        await asyncio.sleep(2.0)  # let contracts load first
+        await asyncio.sleep(2.0)  # pricekaj da se ugovori ucitaju
         while True:
             try:
                 token_ids = list({c.token_id for c in self._contracts.values()})
@@ -173,16 +173,16 @@ class PolymarketClient:
                 logger.debug("Book refresh loop error: %s", exc)
             await asyncio.sleep(BOOK_REFRESH_INTERVAL)
 
-    # ── WebSocket order book feed ─────────────────────────────────
+    # ── WebSocket feed order booka ────────────────────────────────
 
     async def _ws_book_loop(self):
         """
-        WebSocket primary feed for real-time order book updates.
-        Connects to Polymarket CLOB WS and subscribes to all active token IDs.
-        REST polling (_book_refresh_loop) runs as a slow fallback alongside this.
-        Reconnects automatically on any failure.
+        WebSocket primarni feed za azuriranja order booka u stvarnom vremenu.
+        Spaja se na Polymarket CLOB WS i pretplacuje na sve aktivne token ID-jeve.
+        REST polling (_book_refresh_loop) radi kao spori fallback uz ovu petlju.
+        Automatski se ponovno spaja pri svakom kvaru.
         """
-        await asyncio.sleep(3.0)  # let initial REST load complete
+        await asyncio.sleep(3.0)  # pricekaj da se pocetno REST ucitavanje dovrsi
         while True:
             try:
                 async with aiohttp.ClientSession(timeout=WS_TIMEOUT) as ws_session:
@@ -194,7 +194,7 @@ class PolymarketClient:
                         self._ws = ws
                         self._ws_subscribed.clear()
 
-                        # Subscribe to all current token IDs
+                        # Pretplati se na sve trenutne token ID-jeve
                         token_ids = list({c.token_id for c in self._contracts.values()})
                         if token_ids:
                             await ws.send_json({"type": "MARKET", "assets_ids": token_ids})
@@ -224,7 +224,7 @@ class PolymarketClient:
             return
 
         if event == "book":
-            # Full snapshot — rebuild level map and extract best prices
+            # Puni snapshot — rekonstruiraj mapu razina i izvuci najbolje cijene
             buys  = {float(e["price"]): float(e["size"]) for e in data.get("buys",  []) if float(e.get("size", 0)) > 0}
             sells = {float(e["price"]): float(e["size"]) for e in data.get("sells", []) if float(e.get("size", 0)) > 0}
             self._book_levels[token_id] = {"buys": buys, "sells": sells}
@@ -233,7 +233,7 @@ class PolymarketClient:
         elif event == "price_change":
             levels = self._book_levels.get(token_id)
             if levels is None:
-                return  # no snapshot yet — wait for it
+                return  # jos nema snapshota — cekaj
             for change in data.get("changes", []):
                 price = float(change["price"])
                 size  = float(change["size"])
@@ -245,7 +245,7 @@ class PolymarketClient:
             self._recompute_book(token_id)
 
     def _recompute_book(self, token_id: str):
-        """Extract best bid/ask from level map and write to _order_books."""
+        """Izvuci best bid/ask iz mape razina i zapisi u _order_books."""
         levels = self._book_levels.get(token_id)
         if not levels:
             return
@@ -269,7 +269,7 @@ class PolymarketClient:
         )
 
     async def _ws_subscribe_new(self, new_token_ids: list):
-        """Subscribe newly discovered contract tokens to the live WS connection."""
+        """Pretplati novootkrivene token ugovore na live WS konekciju."""
         if not self._ws or not new_token_ids:
             return
         try:
@@ -290,12 +290,12 @@ class PolymarketClient:
         usdc_amount: float,
     ) -> Optional[dict]:
         """
-        Place a market order and wait for CONFIRMED status.
-        Only callable in live mode.
+        Postavi market order i cekaj CONFIRMED status.
+        Poziva se samo u live modu.
 
-        V2 CLOB note (April 2026): ~35% of profitable BUY orders revert on-chain.
-        MATCHED ≠ settled — we poll for CONFIRMED before booking the position.
-        Returns confirmed order dict, or None if fill failed/reverted.
+        V2 CLOB napomena (travanj 2026): ~35% profitabilnih BUY naloga se vraca on-chain.
+        MATCHED ≠ namiren — cekamo CONFIRMED prije nego upisemo poziciju.
+        Vraca potvrdjeni order dict, ili None ako fill nije uspio/vracen je.
         """
         if not self.config.is_live_trading:
             raise RuntimeError("place_market_order called in paper-trading mode!")
@@ -325,7 +325,7 @@ class PolymarketClient:
 
             logger.info("Order submitted %s — polling for CONFIRMED status", order_id)
 
-            # Poll for CONFIRMED (filled + settled on Polygon) — up to 30s
+            # Polliraj za CONFIRMED (ispunjen + namiren na Polygonu) — do 30s
             confirmed = await self._poll_order_confirmed(order_id, timeout=30.0)
             if confirmed:
                 logger.info("Order CONFIRMED: %s", order_id)
@@ -339,7 +339,7 @@ class PolymarketClient:
             return None
 
     async def _poll_order_confirmed(self, order_id: str, timeout: float = 30.0) -> Optional[dict]:
-        """Poll CLOB for order status until CONFIRMED or CANCELED/timeout."""
+        """Pollaj CLOB za status naloga dok ne bude CONFIRMED ili CANCELED/timeout."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -357,7 +357,7 @@ class PolymarketClient:
             await asyncio.sleep(1.0)
         return None
 
-    # ── Contract discovery ────────────────────────────────────────
+    # ── Otkrivanje ugovora ────────────────────────────────────────
 
     async def _refresh_loop(self):
         while True:
@@ -369,9 +369,9 @@ class PolymarketClient:
 
     async def _refresh_contracts(self):
         """
-        Discover active Up/Down markets via slug construction.
-        Slug format: {asset}-updown-{duration}m-{unix_window_start}
-        Each asset+duration gets the current window + next window prefetched.
+        Otkriva aktivna Up/Down trzista putem konstrukcije sluga.
+        Format sluga: {asset}-updown-{duration}m-{unix_window_start}
+        Svaki asset+trajanje dobiva trenutni prozor + sljedeci prozor prethodno dohvacen.
         """
         found = {}
         now = int(time.time())
@@ -380,7 +380,7 @@ class PolymarketClient:
             for duration_mins in self.config.UPDOWN_DURATIONS:
                 duration_secs = duration_mins * 60
                 current_window = (now // duration_secs) * duration_secs
-                # Fetch current and next window so we're ready before expiry
+                # Dohvati trenutni i sljedeci prozor da budemo spremni prije isteka
                 for window_start in [current_window, current_window + duration_secs]:
                     slug = f"{asset_slug}-updown-{duration_mins}m-{window_start}"
                     try:
@@ -420,13 +420,13 @@ class PolymarketClient:
         self, market: dict, asset: str, duration_mins: int
     ) -> List[Contract]:
         """
-        Parse a Gamma event market dict into UP + DOWN Contract objects.
-        Returns empty list if market is not tradeable or token IDs are missing.
+        Parsira Gamma event market dict u UP + DOWN Contract objekte.
+        Vraca praznu listu ako trziste nije dostupno za trading ili nedostaju token ID-jevi.
         """
         if market.get("closed") or not market.get("active", True):
             return []
 
-        # Token IDs are stored as a JSON string in clobTokenIds
+        # Token ID-jevi su pohranjeni kao JSON string u clobTokenIds
         try:
             token_ids = json_mod.loads(market.get("clobTokenIds", "[]"))
         except (ValueError, TypeError):
@@ -448,7 +448,7 @@ class PolymarketClient:
         end_date     = market.get("endDate", market.get("endDateIso", ""))
         question     = market.get("question", "")
 
-        # Extract window_start from slug (format: {asset}-updown-{duration}m-{timestamp})
+        # Izvuci window_start iz sluga (format: {asset}-updown-{duration}m-{timestamp})
         slug = market.get("slug", "")
         try:
             window_start = int(slug.split("-")[-1])
@@ -486,13 +486,13 @@ class PolymarketClient:
             ),
         ]
 
-    # ── Order book parsing ────────────────────────────────────────
+    # ── Parsiranje order booka ────────────────────────────────────
 
     def _parse_order_book(self, token_id: str, data: dict) -> OrderBook:
         bids = data.get("bids", [])
         asks = data.get("asks", [])
 
-        # Use max/min to be safe regardless of API sort order — mirrors WS _recompute_book
+        # Koristi max/min neovisno o redoslijedu sortiranja API-ja — zrcali WS _recompute_book
         best_bid = max((float(b["price"]) for b in bids), default=0.0)
         best_ask = min((float(a["price"]) for a in asks), default=1.0)
         best_ask_size = next(
@@ -512,7 +512,7 @@ class PolymarketClient:
         self._order_books[token_id] = book
         return book
 
-    # ── Helpers ───────────────────────────────────────────────────
+    # ── Pomocne metode ────────────────────────────────────────────
 
     async def _rate_limit(self):
         async with self._rate_lock:
@@ -527,7 +527,7 @@ class PolymarketClient:
             from py_clob_client.client import ClobClient
             self._clob_client = ClobClient(
                 host=CLOB_URL,
-                chain_id=137,  # Polygon mainnet
+                chain_id=137,  # Polygon mainnet (ne mjenjati)
                 private_key=self.config.POLYGON_PRIVATE_KEY,
             )
             logger.info("CLOB client initialised for live trading.")

@@ -2,7 +2,7 @@
 core/coinbase_feed.py — Coinbase Advanced Trade WebSocket feed.
 
 Autentikacija: HMAC-SHA256 s Coinbase Developer Platform ključem.
-  - API Key ID  = UUID (npr. b2c9d6c1-5338-48ae-b6db-7f6dfae0ae61)
+  - API Key ID  = path oblika organizations/.../apiKeys/...
   - API Secret  = base64 string s CDP portala
 
 Ako nema ključa → javni WebSocket (radi i bez ključa).
@@ -73,7 +73,7 @@ class PriceHistory:
         return (latest.price - old[-1].price) / old[-1].price
 
     def realized_vol_annual(self, lookback_secs: int = 120) -> float:
-        """Annualised realised volatility from recent log-returns. Fallback=0.80."""
+        """Annualizirana realizirana volatilnost iz nedavnih log-povrata. Fallback=0.80."""
         now = time.time()
         ticks = [t for t in self._ticks if t.timestamp >= now - lookback_secs]
         if len(ticks) < 6:
@@ -192,7 +192,7 @@ class CoinbaseFeed:
                 delay = min(delay * 2, MAX_RECONNECT_DELAY)
 
     async def _run_ws(self):
-        # Coinbase Exchange/Pro WebSocket (CDP advanced-trade-api endpoint was deprecated)
+        # Coinbase Exchange/Pro WebSocket (CDP advanced-trade-api endpoint je zastario)
         subscribe_msg = {
             "type": "subscribe",
             "product_ids": self.config.ASSETS,
@@ -215,7 +215,7 @@ class CoinbaseFeed:
                     logger.debug("Parse error: %s", exc)
 
     async def _binance_loop(self):
-        """Binance WebSocket — fires 50-200ms before Coinbase, gives earlier signal."""
+        """Binance WebSocket — okida 50-200ms prije Coinbasea, daje raniji signal."""
         delay = RECONNECT_DELAY
         while self._running:
             try:
@@ -261,7 +261,7 @@ class CoinbaseFeed:
             logger.error("Coinbase WS error: %s", msg.get("message", msg))
             return
 
-        # Exchange/Pro format: flat ticker message per trade
+        # Exchange/Pro format: ravna ticker poruka po transakciji
         if msg_type != "ticker":
             return
 

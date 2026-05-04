@@ -58,15 +58,15 @@ class RiskManager:
 
     @property
     def daily_drawdown_pct(self) -> float:
-        """Realized losses today / day-start balance. Used for kill switch.
-        Does NOT count capital allocated to open positions — only closed-trade losses."""
+        """Realizirani gubici danas / pocetak-dana balans. Koristi se za kill switch.
+        Ne broji kapital alociran u otvorenim pozicijama — samo gubici zatvorenih tradova."""
         if self._day_start_balance == 0:
             return 0.0
         return self._realized_daily_loss / self._day_start_balance
 
     @property
     def balance_drawdown_pct(self) -> float:
-        """Balance vs day-start including open position allocation. For display only."""
+        """Balans u odnosu na pocetak dana ukljucujuci alokaciju otvorenih pozicija. Samo za prikaz."""
         if self._day_start_balance == 0:
             return 0.0
         loss = self._day_start_balance - self._current_balance
@@ -104,10 +104,7 @@ class RiskManager:
     # ── Pre-trade checks ──────────────────────────────────────────
 
     def can_trade(self) -> tuple[bool, str]:
-        """
-        Returns (True, "") if we're allowed to open a new trade,
-        else (False, reason).
-        """
+        """Vraca (True, "") ako smijemo otvoriti novi trade, inace (False, razlog)."""
         self.check_day_rollover()
 
         if self._killed:
@@ -166,9 +163,9 @@ class RiskManager:
 
     def on_trade_closed(self, gross_return: float, net_pnl: float = None):
         """
-        gross_return: cash returned to balance (full payout for win, 0 for loss).
-        net_pnl: net profit/loss for display tracking (defaults to gross_return).
-        Stake is already deducted at on_trade_opened, so gross_return on a win = shares * $1.
+        gross_return: gotovina vracena na balans (pun isplata za pobjedu, 0 za gubitak).
+        net_pnl: neto profit/gubitak za pracenje (po defaultu jednak gross_return).
+        Ulozeni iznos je vec oduzet pri on_trade_opened, pa gross_return pri pobjedi = dionice * $1.
         """
         self._current_balance += gross_return
         pnl_value = net_pnl if net_pnl is not None else gross_return
@@ -190,7 +187,7 @@ class RiskManager:
             )
 
     def update_balance(self, new_balance: float):
-        """Directly set balance (e.g. from live wallet query)."""
+        """Direktno postavi balans (npr. iz live wallet upita)."""
         self._current_balance = new_balance
         self._update_drawdown()
 
@@ -202,7 +199,7 @@ class RiskManager:
         self._killed = True
         self._killed_at = time.time()
         self._kill_reason = reason
-        logger.critical("🛑 KILL SWITCH FIRED: %s", reason)
+        logger.critical("KILL SWITCH AKTIVIRAN: %s", reason)
 
         for cb in self._on_kill_callbacks:
             try:

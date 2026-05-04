@@ -28,7 +28,7 @@ class Config:
     POLYMARKET_GAMMA_URL: str = "https://gamma-api.polymarket.com"
 
     # ── Arbitrage parametri ──────────────────────────────────────
-    LAG_THRESHOLD_PCT: float = 0.003  # 0.3% in 10s — bigger moves have residual edge after MM repricing
+    LAG_THRESHOLD_PCT: float = 0.003  # 0.3% u 10s — veci pokreti imaju ostatni edge nakon MM repricinga
     MIN_EDGE: float = 0.02
     MIN_CONFIDENCE: float = 0.40
     PRICE_WINDOW_SECONDS: int = 10
@@ -39,35 +39,35 @@ class Config:
     KELLY_FRACTION: float = 0.50
     MAX_POSITION_PCT: float = 0.08
     MIN_TRADE_USDC: float = 1.0
-    MIN_MARKET_PRICE: float = 0.15   # reject deep OTM contracts — model unreliable below 15¢
-    TAKER_FEE: float = 0.02          # Polymarket taker fee per leg (~2%, actual BTC/ETH = 1.80%)
-    BUNDLE_MIN_PROFIT: float = 0.03  # minimum guaranteed profit for bundle arb (after fees)
+    MIN_MARKET_PRICE: float = 0.15   # odbaci duboko OTM ugovore — model nije pouzdan ispod 15¢
+    TAKER_FEE: float = 0.02          # Polymarket taker fee po nozi (~2%, stvarni BTC/ETH = 1.80%)
+    BUNDLE_MIN_PROFIT: float = 0.03  # minimalna zagarantirana zarada za bundle arb (nakon feeva)
 
     # ── Markets to monitor ───────────────────────────────────────
     UPDOWN_DURATIONS: list = field(default_factory=lambda: [5, 15])
-    # 15-min: wider spreads + less HFT competition; fees same as 5-min (1.80% BTC/ETH)
+    # 15-min: siri spreadovi + manja HFT konkurencija; isti feevi kao 5-min (1.80% BTC/ETH)
 
     # ── Risk management ──────────────────────────────────────────
     MAX_DAILY_DRAWDOWN: float = 0.20
     MAX_OPEN_POSITIONS: int = 6
     COOLDOWN_AFTER_KILL_SECS: int = 3600
-    EARLY_EXIT_THRESHOLD: float = 0.35  # exit if token mid drops below 35% of entry price
-    EARLY_WIN_THRESHOLD: float = 0.82   # close early and lock profit if token mid reaches 82%+
-    MIN_WINDOW_SECS_REMAINING: int = 60  # don't enter in last 60s of contract window
+    EARLY_EXIT_THRESHOLD: float = 0.35  # izlaz ako token mid padne ispod 35% ulazne cijene
+    EARLY_WIN_THRESHOLD: float = 0.82   # rani izlaz i zakljucavanje profita ako token mid dostigne 82%+
+    MIN_WINDOW_SECS_REMAINING: int = 60  # ne ulazi u zadnjih 60s prozora ugovora
 
     # ── Live trading safety limits ───────────────────────────────
-    # Percentage-based limits — computed from actual wallet balance at startup.
-    # This way the same config works whether you deposit $20 or $2000.
-    MAX_LIVE_TRADE_PCT: float = 0.15      # max 15% of balance per single trade (hard cap above Kelly's 8%)
-    MIN_LIVE_BALANCE_PCT: float = 0.10    # kill switch floor: stop if balance drops below 10% of start
+    # Postotni limiti — izracunati iz stvarnog balansa novcanika pri pokretanju.
+    # Na taj nacin ista konfiguracija radi bez obzira jesi li uplatio $20 ili $2000.
+    MAX_LIVE_TRADE_PCT: float = 0.15      # max 15% balansa po jednoj transakciji (hard cap iznad Kellyjevih 8%)
+    MIN_LIVE_BALANCE_PCT: float = 0.10    # kill switch prag: zaustavi ako balans padne ispod 10% pocetne vrijednosti
 
-    # Filled automatically from live balance × pct above — do not set manually.
+    # Popunjava se automatski iz live balansa × gornji postotak — ne postavljaj rucno.
     MAX_LIVE_TRADE_USDC: float = 0.0
     MIN_LIVE_BALANCE_USDC: float = 0.0
 
-    MAX_TRADES_PER_HOUR: int = 10         # rate limit: refuse if already placed N trades this hour
-    LIVE_STARTUP_DELAY_SECS: int = 30     # wait before first live trade (let WS/books stabilize)
-    MAX_LIVE_SLIPPAGE_PCT: float = 0.015  # abort live fill if fill_price > ask + 1.5%
+    MAX_TRADES_PER_HOUR: int = 10         # ogranicenje brzine: odbij ako je vec postavljeno N transakcija ovaj sat
+    LIVE_STARTUP_DELAY_SECS: int = 30     # cekaj prije prve live transakcije (dok se WS/order bookovi stabiliziraju)
+    MAX_LIVE_SLIPPAGE_PCT: float = 0.015  # prekini live fill ako je fill_price > ask + 1.5%
 
     # ── Market refresh ───────────────────────────────────────────
     CONTRACT_REFRESH_INTERVAL: int = 60

@@ -79,7 +79,7 @@ class ArbitrageEngine:
             return []
 
         logger.info(
-            "LAG signal %s: price=%.2f Δ=%.3f%% — scanning contracts",
+            "LAG signal %s: cijena=%.2f delta=%.3f%% — skeniranje ugovora",
             asset, tick.price, price_change * 100,
         )
 
@@ -92,7 +92,7 @@ class ArbitrageEngine:
         if not contracts:
             return []
 
-        # Capture price_to_beat on first encounter (approximates Chainlink price at window open)
+        # Zabilijezi price_to_beat pri prvom susretu (aproksimacija Chainlink cijene na pocetku prozora)
         for contract in contracts:
             if contract.price_to_beat == 0.0 and tick.price > 0:
                 contract.price_to_beat = tick.price
@@ -141,9 +141,9 @@ class ArbitrageEngine:
             )
             return None
 
-        # Reject deep OTM contracts — model probability is unreliable below MIN_MARKET_PRICE.
-        # A 9-cent option means market assigns ~9% probability; our log-normal model
-        # can diverge by 30+ percentage points here, producing false high-edge signals.
+        # Odbaci duboko OTM ugovore — model nije pouzdan ispod MIN_MARKET_PRICE.
+        # Devetcentni ugovor znaci ~9% vjerojatnosti; nas log-normalni model
+        # moze grijesiti i 30+ postotnih bodova, sto daje lazne high-edge signale.
         if market_price < self.config.MIN_MARKET_PRICE:
             logger.info(
                 "  ✗ %s %s %dmin: deep OTM ask=%.3f < %.2f (book_age=%dms)",
@@ -154,7 +154,7 @@ class ArbitrageEngine:
 
         elapsed_secs = int(time.time()) - contract.window_start if contract.window_start > 0 else 0
 
-        # Don't enter in the last minute — market is already efficient near expiry
+        # Ne ulazi u zadnjoj minuti — trziste je vec ucinkovito blizu isteka
         time_remaining = contract.duration_mins * 60 - elapsed_secs
         if time_remaining < self.config.MIN_WINDOW_SECS_REMAINING:
             logger.info(
@@ -164,7 +164,7 @@ class ArbitrageEngine:
             )
             return None
 
-        # Liquidity depth: ensure enough shares available at best ask
+        # Dubina likvidnosti: provjeri da ima dovoljno dionica po best ask cijeni
         min_shares = self.config.MIN_TRADE_USDC / max(market_price, 0.01)
         if book.best_ask_size > 0 and book.best_ask_size < min_shares * 0.5:
             logger.info(
@@ -174,18 +174,18 @@ class ArbitrageEngine:
             )
             return None
 
-        # Dynamic realized volatility (more accurate than hardcoded 80%)
+        # Dinamicna realizirana volatilnost (preciznije od hardkodirane 80%)
         annual_vol = self.feed.realized_vol_annual(contract.asset, lookback_secs=120)
         annual_vol = max(0.10, min(3.0, annual_vol))
 
-        # Use Chainlink oracle price as the settlement reference when available.
-        # Polymarket settles against Chainlink, not Coinbase — divergence matters.
+        # Koristi Chainlink oracle cijenu kao referencu za namirenje kad je dostupna.
+        # Polymarket namiruje prema Chainlinku, ne Coinbaseu — razlika je bitna.
         oracle_price = None
         if self.chainlink:
             oracle_price = self.chainlink.get_validated(contract.asset, tick.price)
         effective_price = oracle_price if oracle_price else tick.price
 
-        # If oracle is available and price_to_beat not set yet, bootstrap it now
+        # Ako je oracle dostupan a price_to_beat jos nije postavljen, postavi ga sada
         if oracle_price and contract.price_to_beat == 0.0:
             contract.price_to_beat = oracle_price
             logger.debug(
@@ -193,7 +193,7 @@ class ArbitrageEngine:
                 contract.asset, contract.direction, contract.duration_mins, oracle_price,
             )
 
-        # Build an effective tick using oracle price for the probability model
+        # Kreiraj efektivni tick s oracle cijenom za model vjerojatnosti
         effective_tick = PriceTick(
             asset=tick.asset,
             price=effective_price,
@@ -224,9 +224,9 @@ class ArbitrageEngine:
             duration_mins=contract.duration_mins,
         )
 
-        # Chainlink oracle boost: when Coinbase price diverges >0.4% from the last on-chain
-        # oracle value, a deviation-triggered round update is imminent — this is the highest-
-        # confidence signal available. Cap at 0.99 to avoid false certainty.
+        # Chainlink boost: kad Coinbase cijena odstupa >0.4% od zadnje on-chain
+        # oracle vrijednosti, azuriranje je neizbiezno — ovo je signal
+        # najvise pouzdanosti. Ograniceno na 0.99 radi izbjegavanja lazne sigurnosti.
         if oracle_price and tick.price > 0:
             oracle_deviation = abs(tick.price - oracle_price) / oracle_price
             if oracle_deviation >= 0.004:
@@ -283,11 +283,11 @@ class ArbitrageEngine:
 
     def _scan_bundles(self, asset: str) -> list:
         """
-        Bundle arbitrage: if UP.ask + DOWN.ask < 1 - fees, buying both guarantees profit.
-        No price movement needed — works in flat markets.
+        Bundle arbitraza: ako UP.ask + DOWN.ask < 1 - fees, kupnja oba garantira profit.
+        Ne treba kretanje cijene — radi i na mirnom trzistu.
         """
         all_contracts = self.polymarket.get_contracts()
-        # Group by market (pair UP+DOWN from same condition)
+        # Grupiranje po trzistu (spoji UP+DOWN iz istog uvjeta)
         markets: dict = {}
         for c in all_contracts:
             if c.asset != asset or not c.active:
@@ -307,13 +307,13 @@ class ArbitrageEngine:
             if not up_book or not down_book:
                 continue
 
-            # Freshness check (max 4 seconds)
+            # Provjera svjezine (max 4 sekunde)
             if time.time() - up_book.timestamp > 4.0 or time.time() - down_book.timestamp > 4.0:
                 continue
 
-            # Per-leg sanity: both legs must be priced like active binary contracts.
-            # $0.01 asks come from expired/illiquid markets with stale resting orders —
-            # they produce fake 98% "guaranteed profit" and massive over-sized positions.
+            # Provjera valjanosti: obje noge moraju biti cijenjene kao aktivni binarni ugovori.
+            # Askovi od $0.01 dolaze iz isteklih/nelikvidnih trzista sa zaostalim narudzbenicama —
+            # oni proizvode laznih 98% "garantiranog profita" i prekomjerno velike pozicije.
             if (up_book.best_ask < self.config.MIN_MARKET_PRICE or
                     down_book.best_ask < self.config.MIN_MARKET_PRICE or
                     up_book.best_ask > 1.0 - self.config.MIN_MARKET_PRICE or
@@ -332,8 +332,8 @@ class ArbitrageEngine:
             if guaranteed_profit < self.config.BUNDLE_MIN_PROFIT:
                 continue
 
-            # Liquidity depth: ensure enough shares exist to fill a minimum-size trade.
-            # Paper simulator assumes infinite depth — live trading does not.
+            # Dubina likvidnosti: provjeri da postoji dovoljno dionica za minimalnu velicinu trada.
+            # Paper simulator pretpostavlja beskonacnu dubinu — live trading ne.
             min_shares = self.config.MIN_TRADE_USDC / max(up_book.best_ask, 0.01)
             if (up_book.best_ask_size > 0 and up_book.best_ask_size < min_shares * 0.5) or \
                (down_book.best_ask_size > 0 and down_book.best_ask_size < min_shares * 0.5):
@@ -344,7 +344,7 @@ class ArbitrageEngine:
                 )
                 continue
 
-            # Represent as UP opportunity with special flag; trading engine handles both legs
+            # Predstavi kao UP priliku s posebnom zastavicom; trading engine obradjuje obje noge
             opp = Opportunity(
                 contract=up_c,
                 order_book=up_book,
@@ -368,7 +368,7 @@ class ArbitrageEngine:
 
         return opportunities
 
-    # ── Static helpers (no self dependency — fixes the NoneType bug) ──────────
+    # ── Staticne pomocne metode ──────────────────────────────────────────────
 
     @staticmethod
     def _estimate_up_probability(
@@ -383,37 +383,37 @@ class ArbitrageEngine:
         annual_vol: float = 0.80,
     ) -> float:
         """
-        P(price_at_expiry >= price_to_beat) using log-normal model.
+        P(cijena_pri_isteku >= price_to_beat) koristeci log-normalni model.
 
-        When price_to_beat is known (primary model):
-          - 50% price-to-beat delta: N(log(current/target) / vol_remaining)
-          - 30% momentum: recent Coinbase drift
-          - 20% order book: market's implied probability
+        Kad je price_to_beat poznat (primarni model):
+          - 50% price-to-beat delta: N(log(trenutna/ciljna) / vol_ostatak)
+          - 30% momentum: nedavni Coinbase drift
+          - 20% order book: implicirana vjerojatnost trzista
 
-        Fallback (no price_to_beat yet):
-          - Original momentum + order book model
+        Fallback (price_to_beat jos nije zabilijezen):
+          - Originalni momentum + order book model
         """
         remaining_secs = max(10, duration_mins * 60 - elapsed_secs)
         remaining_years = remaining_secs / (365.25 * 24 * 3600)
         vol = annual_vol * math.sqrt(remaining_years)
 
-        # Order book implied probability (market consensus)
+        # Order book implicirana vjerojatnost (konsenzus trzista)
         prob_book = max(0.05, min(0.95, 1.0 - book.best_ask))
 
         if price_to_beat > 0 and tick.price > 0 and vol > 0:
-            # Primary signal: how far current price is from the target
-            # Positive log_delta → already above target → favours UP
+            # Primarni signal: koliko je trenutna cijena daleko od ciljne
+            # Pozitivni log_delta → vec iznad cilja → povoljno za UP
             log_delta = math.log(tick.price / price_to_beat)
             z_ptb = log_delta / vol
             prob_ptb = ArbitrageEngine._normal_cdf(z_ptb)
 
-            # Secondary: short-term momentum confirms direction
+            # Sekundarno: kratkorocni momentum potvrdjuje smjer
             z_mom = (price_change_pct * 0.5) / vol
             prob_mom = ArbitrageEngine._normal_cdf(z_mom)
 
             prob = 0.50 * prob_ptb + 0.30 * prob_mom + 0.20 * prob_book
         else:
-            # Fallback: original model (price_to_beat not yet captured)
+            # Fallback: originalni model (price_to_beat jos nije zabilijezen)
             vol_dur = annual_vol * math.sqrt(duration_mins / (365 * 24 * 60))
             z_mom = (price_change_pct * 0.5) / vol_dur if vol_dur > 0 else 0.0
             prob_mom = ArbitrageEngine._normal_cdf(z_mom)
@@ -428,7 +428,7 @@ class ArbitrageEngine:
         book: OrderBook,
         duration_mins: int,
     ) -> float:
-        """Composite confidence 0–1."""
+        """Kompozitni confidence score 0–1."""
         magnitude   = min(abs(price_change_pct) / 0.001, 1.0)
         edge_score  = min(abs(edge) / 0.20, 1.0)
         spread_score = max(0.0, 1.0 - book.spread / 0.10)

@@ -26,8 +26,8 @@ from typing import Optional
 import aiohttp
 
 # ── Windows asyncio fix ───────────────────────────────────────────────────────
-# Required on Windows to avoid "RuntimeError: Event loop is closed" with
-# websockets and aiohttp. Must be set BEFORE any asyncio usage.
+# Potrebno na Windowsu da se izbjegne "RuntimeError: Event loop is closed"
+# s websockets i aiohttp. Mora se postaviti PRIJE bilo koje asyncio upotrebe.
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -42,7 +42,7 @@ from core.trading_engine import TradingEngine
 from core.telegram_alerts import TelegramBot
 from core.dashboard import Dashboard
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Logiranje ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -57,9 +57,9 @@ logger = logging.getLogger(__name__)
 
 _PID_FILE = Path(__file__).parent / "bot.pid"
 
-# Native USDC on Polygon (used by Polymarket CLOB)
+# Native USDC na Polygonu (koristi Polymarket CLOB)
 _USDC_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-_USDC_DECIMALS  = 1_000_000  # 6 decimal places
+_USDC_DECIMALS  = 1_000_000  # 6 decimalnih mjesta
 _POLYGON_RPCS   = [
     "https://polygon-bor-rpc.publicnode.com",
     "https://1rpc.io/matic",
@@ -69,14 +69,14 @@ _POLYGON_RPCS   = [
 
 async def _fetch_usdc_balance(address: str) -> Optional[float]:
     """
-    Query real USDC balance on Polygon via public RPC.
-    Calls ERC-20 balanceOf(address) on the native USDC contract.
-    Returns None if all RPCs fail.
+    Dohvati stvarni USDC balans na Polygonu putem javnog RPC-a.
+    Poziva ERC-20 balanceOf(address) na native USDC ugovoru.
+    Vraca None ako svi RPC-ovi zataje.
     """
     if not address or not address.startswith("0x"):
         return None
     padded = address[2:].lower().zfill(64)
-    data = f"0x70a08231{padded}"   # balanceOf(address) selector
+    data = f"0x70a08231{padded}"   # balanceOf(address) selektor
     payload = {
         "jsonrpc": "2.0",
         "method": "eth_call",
@@ -98,7 +98,7 @@ async def _fetch_usdc_balance(address: str) -> Optional[float]:
     return None
 
 
-# ── Single-instance lock ──────────────────────────────────────────────────────
+# ── Zakljucavanje jedne instance ─────────────────────────────────────────────
 
 def _pid_running(pid: int) -> bool:
     try:
@@ -131,16 +131,16 @@ def _release_pid_lock():
         pass
 
 
-# ── Live pre-flight check ─────────────────────────────────────────────────────
+# ── Live pre-flight provjera ──────────────────────────────────────────────────
 
 async def _live_preflight(config, bot) -> bool:
-    """Verify all systems before any real money can trade."""
+    """Provjeri sve sustave prije nego sto pravi novac moze biti tradean."""
     print("\n" + "=" * 60)
     print("  LIVE TRADING PRE-FLIGHT CHECK")
     print("=" * 60)
     ok = True
 
-    # 1. py-clob-client installed?
+    # 1. py-clob-client instaliran?
     try:
         import py_clob_client as _clob
         ver = getattr(_clob, "__version__", "unknown")
@@ -153,7 +153,7 @@ async def _live_preflight(config, bot) -> bool:
         print("  [FAIL] py-clob-client not installed → pip install py-clob-client")
         ok = False
 
-    # 2. Contracts loaded?
+    # 2. Ugovori ucitani?
     contracts = bot.polymarket.get_contracts()
     if contracts:
         print(f"  [OK] {len(contracts)} contracts loaded from Polymarket")
@@ -161,14 +161,14 @@ async def _live_preflight(config, bot) -> bool:
         print("  [FAIL] No contracts loaded — check network/API")
         ok = False
 
-    # 3. Order books populating?
+    # 3. Order bookovi se pune?
     with_books = sum(1 for c in contracts if bot.polymarket._order_books.get(c.token_id))
     if with_books:
         print(f"  [OK] {with_books}/{len(contracts)} order books populated")
     else:
         print("  [WARN] Order books not yet populated (WS may still be connecting)")
 
-    # 4. No suspiciously cheap order books (the $0.01 bug)?
+    # 4. Nema sumnjivih order bookova po cijeni $0.01 (poznati bug)?
     bogus = [
         c for c in contracts
         if (book := bot.polymarket._order_books.get(c.token_id))
@@ -179,14 +179,14 @@ async def _live_preflight(config, bot) -> bool:
     else:
         print(f"  [OK] All order book prices within valid range")
 
-    # 5. Chainlink oracle?
+    # 5. Chainlink oracle aktivan?
     btc_oracle = bot.chainlink.get_price("BTC")
     if btc_oracle:
         print(f"  [OK] Chainlink BTC oracle: ${btc_oracle:,.2f}")
     else:
         print("  [WARN] Chainlink oracle not yet responding (non-critical, uses Coinbase fallback)")
 
-    # 6. Coinbase feed live?
+    # 6. Coinbase feed aktivan?
     btc_tick = bot.feed.latest("BTC")
     if btc_tick:
         print(f"  [OK] Coinbase feed live: BTC=${btc_tick.price:,.2f}")
@@ -194,7 +194,7 @@ async def _live_preflight(config, bot) -> bool:
         print("  [FAIL] Coinbase price feed not active")
         ok = False
 
-    # 7. Real on-chain USDC balance + compute dynamic limits
+    # 7. Stvarni on-chain USDC balans + izracun dinamickih limita
     real_balance = await _fetch_usdc_balance(config.POLYGON_ADDRESS)
     if real_balance is not None:
         if real_balance == 0:
@@ -202,15 +202,15 @@ async def _live_preflight(config, bot) -> bool:
             ok = False
         else:
             print(f"  [OK] Polygon USDC balance: ${real_balance:.2f} USDC")
-            # Derive USDC hard limits from the actual balance
+            # Izvedi USDC hard limite iz stvarnog balansa
             config.MAX_LIVE_TRADE_USDC  = round(real_balance * config.MAX_LIVE_TRADE_PCT, 2)
             config.MIN_LIVE_BALANCE_USDC = round(real_balance * config.MIN_LIVE_BALANCE_PCT, 2)
-        # Sync risk manager so it tracks the actual wallet, not the paper default
+        # Sinkroniziraj risk manager da prati stvarni novcanik, ne paper zadanu vrijednost
         bot.risk.update_balance(real_balance)
     else:
         print("  [WARN] Could not read on-chain USDC balance (RPC unreachable) — proceeding with caution")
 
-    # 8. Safety limits summary
+    # 8. Sazetak sigurnosnih limita
     print(f"\n  Safety limits active:")
     if real_balance:
         print(f"    Max per-trade:    {config.MAX_LIVE_TRADE_PCT:.0%} of ${real_balance:.2f} = ${config.MAX_LIVE_TRADE_USDC:.2f} USDC")
@@ -236,7 +236,7 @@ async def _live_preflight(config, bot) -> bool:
     return True
 
 
-# ── Main Bot ──────────────────────────────────────────────────────────────────
+# ── Glavni bot ───────────────────────────────────────────────────────────────
 
 class PolymarketBot:
     def __init__(self, config: Config):
@@ -282,12 +282,12 @@ class PolymarketBot:
         self.risk.on_kill(self._on_kill_switch)
         self._scan_queue: asyncio.Queue = asyncio.Queue(maxsize=20)
 
-        # Wire up Telegram remote commands
+        # Povezi Telegram remote naredbe
         self.telegram.on_kill_command   = self._on_telegram_kill
         self.telegram.on_resume_command = self._on_telegram_resume
         self.telegram.on_status_command = self._on_telegram_status
 
-    # ── Lifecycle ─────────────────────────────────────────────────
+    # ── Zivotni ciklus ────────────────────────────────────────────
 
     async def start(self):
         self._running = True
@@ -305,9 +305,9 @@ class PolymarketBot:
         await self.engine.start()
         await self.feed.start()
 
-        # Live pre-flight: verify everything is sane before real money can trade
+        # Live pre-flight: provjeri sve sustave prije pravog novca
         if self.config.is_live_trading:
-            await asyncio.sleep(5.0)  # brief wait for WS + books to start populating
+            await asyncio.sleep(5.0)  # kratko cekanje da se WS i order bookovi napune
             passed = await _live_preflight(self.config, self)
             if not passed:
                 self.request_stop()
@@ -351,7 +351,7 @@ class PolymarketBot:
     def request_stop(self):
         self._stop_event.set()
 
-    # ── Price tick handler ─────────────────────────────────────────
+    # ── Obrada price ticka ────────────────────────────────────────
 
     async def _on_price_tick(self, tick):
         try:
@@ -359,7 +359,7 @@ class PolymarketBot:
         except asyncio.QueueFull:
             pass
 
-    # ── Scan worker ────────────────────────────────────────────────
+    # ── Radnik skeniranja ─────────────────────────────────────────
 
     async def _scan_worker(self):
         while self._running:
@@ -372,9 +372,9 @@ class PolymarketBot:
                 for opp in opportunities:
                     await self.engine.execute_opportunity(opp)
 
-                # Cross-asset oracle lag: Polymarket's ~2.7s oracle delay applies to ALL
-                # assets simultaneously. When any asset fires a confirmed signal, immediately
-                # scan the others — their Polymarket contracts are lagging too.
+                # Cross-asset oracle lag: Polymarketov ~2.7s oracle delay vrijedi za SVE
+                # assete istovremeno. Kad bilo koji asset okine potvrdjeni signal, odmah
+                # skeniraj ostale — njihovi Polymarket ugovori takodje kasne.
                 chg = self.feed.price_change_pct(asset, self.config.PRICE_WINDOW_SECONDS)
                 if abs(chg) >= self.config.LAG_THRESHOLD_PCT:
                     correlated = [
@@ -398,7 +398,7 @@ class PolymarketBot:
                 logger.error("Scan worker error: %s", exc, exc_info=True)
                 await asyncio.sleep(1)
 
-    # ── Callbacks ──────────────────────────────────────────────────
+    # ── Povratni pozivi ───────────────────────────────────────────
 
     async def _on_trade_open(self, pos):
         await self.telegram.send_trade_opened(pos)
@@ -433,14 +433,14 @@ class PolymarketBot:
             f"({sc.get('total', 0)} trades)"
         )
 
-    # ── Background tasks ───────────────────────────────────────────
+    # ── Pozadinski zadaci ─────────────────────────────────────────
 
     async def _bundle_scanner(self):
         """
-        Checks for bundle arbitrage opportunities every 30s — no price signal needed.
-        Bundle arb (UP+DOWN < $0.97) is guaranteed profit regardless of price direction.
+        Provjerava bundle arbitrazne prilike svakih 30s — nije potreban price signal.
+        Bundle arb (UP+DOWN < $0.97) je zagarantirana zarada bez obzira na smjer cijene.
         """
-        await asyncio.sleep(10.0)  # let order books populate first
+        await asyncio.sleep(10.0)  # pricekaj da se order bookovi napune
         while self._running:
             if not self.risk.is_killed:
                 try:
@@ -459,9 +459,9 @@ class PolymarketBot:
 
     async def _live_balance_syncer(self):
         """
-        Every 60s, query the real on-chain USDC balance and sync the risk manager.
-        Prevents the internal balance tracker from drifting from reality (e.g. if an
-        order settles on-chain without a clean callback, or if funds are withdrawn).
+        Svakih 60s dohvaca stvarni on-chain USDC balans i sinkronizira risk manager.
+        Sprecava unutarnji tracker balansa da zaostane za stvarnoscu (npr. ako se nalog
+        namiri on-chain bez cistog callbacka, ili ako se sredstva povuku).
         """
         while self._running:
             await asyncio.sleep(60)
@@ -486,7 +486,7 @@ class PolymarketBot:
                     logger.error("Daily summary error: %s", exc)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Ulazna tocka ─────────────────────────────────────────────────────────────
 
 async def run_stats():
     db = Database()
@@ -502,7 +502,7 @@ async def run_stats():
 
 
 async def run_check():
-    """Quick contract check without starting the full bot."""
+    """Brza provjera ugovora bez pokretanja cijelog bota."""
     sys.path.insert(0, os.path.dirname(__file__))
     from scripts.check_contracts import fetch_contracts, print_results
     import aiohttp
@@ -523,7 +523,7 @@ async def main():
         await run_check()
         return
 
-    # Live trading confirmation
+    # Potvrda live tradinga
     if config.is_live_trading:
         print("\n" + "=" * 60)
         print("  ⚠️  LIVE TRADING MODE ACTIVE")
