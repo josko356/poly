@@ -351,6 +351,26 @@ class TradingEngine:
         up_shares = float(up_result.get("size", parovi))
         up_fill = float(up_result.get("price", up_ask))
 
+        # Provjera slippagea na UP nozi — ako je cijena znacajno losija od ocekivane,
+        # bundle mozda vise nije profitabilan, pa rollbackamo prije nego stavimo DOWN nalog.
+        max_slip = getattr(self.config, "MAX_LIVE_SLIPPAGE_PCT", 0.015)
+        if up_fill > up_ask * (1 + max_slip):
+            logger.error(
+                "[LIVE BUNDLE] UP slippage abort: fill=%.4f ocekivano=%.4f (%.1f%% > %.1f%%) — rollback",
+                up_fill, up_ask, (up_fill / up_ask - 1) * 100, max_slip * 100,
+            )
+            rollback = await self.polymarket.place_market_order(
+                token_id=up_contract.token_id, side="sell", shares=up_shares,
+            )
+            if not rollback:
+                msg = (f"BUNDLE UP SLIPPAGE ROLLBACK PROPAO — naked UP pozicija!\n"
+                       f"Token: {up_contract.token_id}\nDionice: {up_shares:.2f}\n"
+                       f"Provjeri rucno na Polymarketu.")
+                logger.error("[LIVE BUNDLE] %s", msg)
+                if self.on_alert:
+                    await self._safe_callback(self.on_alert, msg)
+            return False
+
         # Noga 2: DOWN
         down_result = await self.polymarket.place_market_order(
             token_id=down_contract.token_id, side="buy", usdc_amount=down_usdc,
@@ -375,6 +395,16 @@ class TradingEngine:
         down_fill = float(down_result.get("price", down_ask))
         usdc_spent = up_shares * up_fill + down_shares * down_fill
         guaranteed_pnl = min(up_shares, down_shares) * (1.0 - up_fill - down_fill)
+
+        # Zadnja provjera: ako su se cijene pomaknule na obje noge i profit je nestao, alertiraj.
+        # Pozicija se i dalje knjizi — ne mozemo vise rollbackati DOWN, ali operator mora znati.
+        if guaranteed_pnl <= 0:
+            msg = (f"BUNDLE NEGATIVNI PROFIT: {guaranteed_pnl:.4f} USDC\n"
+                   f"UP fill={up_fill:.4f} (ocek={up_ask:.4f}), DOWN fill={down_fill:.4f} (ocek={down_ask:.4f})\n"
+                   f"Cijene su se pomaknule pri egzekuciji — pozicija do isteka, ocekuje se gubitak.")
+            logger.critical("[LIVE BUNDLE] %s", msg)
+            if self.on_alert:
+                await self._safe_callback(self.on_alert, msg)
 
         self.risk.on_trade_opened(usdc_spent, is_bundle=True)
 

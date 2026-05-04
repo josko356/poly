@@ -120,9 +120,12 @@ try:
     ok2, msg2 = risk2.can_trade()
     check("Max positions blocks trade",  not ok2, msg2[:40])
 
-    # Kill switch at 20% DD
+    # Kill switch at 20% DD — koristimo on_trade_closed da simuliramo realizirani gubitak
+    # (_realized_daily_loss, ne samo balans)
     risk3 = RiskManager(cfg, 1000.0)
-    risk3._current_balance = 1000.0 * (1 - cfg.MAX_DAILY_DRAWDOWN - 0.005)
+    loss_amount = 1000.0 * (cfg.MAX_DAILY_DRAWDOWN + 0.005)
+    risk3.on_trade_opened(loss_amount)
+    risk3.on_trade_closed(0.0, -loss_amount)  # gubitak = cijeli ulozeni iznos
     risk3.can_trade()
     check("Kill switch fires at 20% DD", risk3.is_killed, f"dd={risk3.daily_drawdown_pct:.1%}")
 
