@@ -309,7 +309,7 @@ class PolymarketClient:
             return None
 
         try:
-            from py_clob_client.clob_types import MarketOrderArgs
+            from py_clob_client_v2.clob_types import MarketOrderArgsV2
 
             book = await self.get_order_book(token_id)
             if not book:
@@ -325,7 +325,7 @@ class PolymarketClient:
                 size  = round(usdc_amount / price, 2)
 
             clob_side = "SELL" if side == "sell" else "BUY"
-            order_args = MarketOrderArgs(token_id=token_id, amount=size, side=clob_side)
+            order_args = MarketOrderArgsV2(token_id=token_id, amount=size, side=clob_side)
             signed_order = self._clob_client.create_market_order(order_args)
             resp = self._clob_client.post_order(signed_order)
 
@@ -535,7 +535,7 @@ class PolymarketClient:
 
     async def _init_clob_client(self):
         try:
-            from py_clob_client.client import ClobClient
+            from py_clob_client_v2.client import ClobClient
             loop = asyncio.get_running_loop()
 
             # Level 1: private key autentikacija
@@ -546,11 +546,10 @@ class PolymarketClient:
             )
 
             # Level 2: deriviraj API credentials iz private keya (potrebno za post_order)
-            # create_or_derive_api_creds je sinkroni HTTP poziv — izvrsavamo u executor
-            creds = await loop.run_in_executor(None, client.create_or_derive_api_creds)
+            creds = await loop.run_in_executor(None, client.create_or_derive_api_key)
             client.set_api_creds(creds)
 
             self._clob_client = client
-            logger.info("CLOB client initialised (Level 2 auth) — api_key=%s...", str(creds.api_key)[:8])
+            logger.info("CLOB client (V2) inicijaliziran — api_key=%s...", str(creds.api_key)[:8])
         except Exception as exc:
             logger.error("Failed to init CLOB client: %s", exc)
