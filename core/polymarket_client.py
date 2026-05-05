@@ -324,7 +324,8 @@ class PolymarketClient:
                 price = book.best_ask
                 size  = round(usdc_amount / price, 2)
 
-            order_args = MarketOrderArgs(token_id=token_id, amount=size)
+            clob_side = "SELL" if side == "sell" else "BUY"
+            order_args = MarketOrderArgs(token_id=token_id, amount=size, side=clob_side)
             signed_order = self._clob_client.create_market_order(order_args)
             resp = self._clob_client.post_order(signed_order)
 
