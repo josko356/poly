@@ -140,17 +140,13 @@ async def _live_preflight(config, bot) -> bool:
     print("=" * 60)
     ok = True
 
-    # 1. py-clob-client instaliran?
+    # 1. py-clob-client-v2 instaliran?
     try:
-        import py_clob_client as _clob
-        ver = getattr(_clob, "__version__", "unknown")
-        print(f"  [OK] py-clob-client {ver}")
-        if ver != "unknown":
-            from packaging.version import Version
-            if Version(ver) < Version("0.34.6"):
-                print(f"  [WARN] v0.34.6+ recommended (V2 CLOB migration fix)")
+        import py_clob_client_v2 as _clob
+        ver = getattr(_clob, "__version__", "1.0.0")
+        print(f"  [OK] py-clob-client-v2 {ver} (CLOB V2 / EIP-712 v2)")
     except ImportError:
-        print("  [FAIL] py-clob-client not installed → pip install py-clob-client")
+        print("  [FAIL] py-clob-client-v2 not installed → pip install py-clob-client-v2")
         ok = False
 
     # 2. Ugovori ucitani?
