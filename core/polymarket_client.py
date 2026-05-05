@@ -536,11 +536,21 @@ class PolymarketClient:
     async def _init_clob_client(self):
         try:
             from py_clob_client.client import ClobClient
-            self._clob_client = ClobClient(
+            loop = asyncio.get_running_loop()
+
+            # Level 1: private key autentikacija
+            client = ClobClient(
                 host=CLOB_URL,
-                chain_id=137,  # Polygon mainnet (ne mjenjati)
+                chain_id=137,
                 key=self.config.POLYGON_PRIVATE_KEY,
             )
-            logger.info("CLOB client initialised for live trading.")
+
+            # Level 2: deriviraj API credentials iz private keya (potrebno za post_order)
+            # create_or_derive_api_creds je sinkroni HTTP poziv — izvrsavamo u executor
+            creds = await loop.run_in_executor(None, client.create_or_derive_api_creds)
+            client.set_api_creds(creds)
+
+            self._clob_client = client
+            logger.info("CLOB client initialised (Level 2 auth) — api_key=%s...", str(creds.api_key)[:8])
         except Exception as exc:
             logger.error("Failed to init CLOB client: %s", exc)
