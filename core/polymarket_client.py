@@ -538,7 +538,7 @@ class PolymarketClient:
             self._clob_client = ClobClient(
                 host=CLOB_URL,
                 chain_id=137,  # Polygon mainnet (ne mjenjati)
-                private_key=self.config.POLYGON_PRIVATE_KEY,
+                key=self.config.POLYGON_PRIVATE_KEY,
             )
             logger.info("CLOB client initialised for live trading.")
         except Exception as exc:

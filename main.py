@@ -528,16 +528,11 @@ async def main():
         await run_check()
         return
 
-    # Potvrda live tradinga
+    # Prikaz moda pri pokretanju
     if config.is_live_trading:
         print("\n" + "=" * 60)
-        print("  ⚠️  LIVE TRADING MODE ACTIVE")
-        print("  You are about to trade REAL USDC on Polygon.")
+        print("  !! LIVE TRADING MODE ACTIVE")
         print("  Wallet:", config.POLYGON_ADDRESS[:10] + "...")
-        confirm = input("  Type 'CONFIRM' to proceed: ").strip()
-        if confirm != "CONFIRM":
-            print("Cancelled.")
-            return
         print("=" * 60 + "\n")
     else:
         print("\n[PAPER] Starting in PAPER TRADING mode.")
