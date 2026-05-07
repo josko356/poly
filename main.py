@@ -57,8 +57,8 @@ logger = logging.getLogger(__name__)
 
 _PID_FILE = Path(__file__).parent / "bot.pid"
 
-# Native USDC na Polygonu (koristi Polymarket CLOB)
-_USDC_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+# pUSD — jedini token koji CLOB V2 prihvaca kao kolateral
+_USDC_CONTRACT  = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 _USDC_DECIMALS  = 1_000_000  # 6 decimalnih mjesta
 _POLYGON_RPCS   = [
     "https://polygon-bor-rpc.publicnode.com",
@@ -68,11 +68,7 @@ _POLYGON_RPCS   = [
 
 
 async def _fetch_usdc_balance(address: str) -> Optional[float]:
-    """
-    Dohvati stvarni USDC balans na Polygonu putem javnog RPC-a.
-    Poziva ERC-20 balanceOf(address) na native USDC ugovoru.
-    Vraca None ako svi RPC-ovi zataje.
-    """
+    """Dohvati pUSD balans na Polygonu putem javnog RPC-a. Vraca None ako svi RPC-ovi zataje."""
     if not address or not address.startswith("0x"):
         return None
     padded = address[2:].lower().zfill(64)
@@ -190,14 +186,14 @@ async def _live_preflight(config, bot) -> bool:
         print("  [FAIL] Coinbase price feed not active")
         ok = False
 
-    # 7. Stvarni on-chain USDC balans + izracun dinamickih limita
+    # 7. Stvarni on-chain pUSD balans + izracun dinamickih limita
     real_balance = await _fetch_usdc_balance(config.POLYGON_ADDRESS)
     if real_balance is not None:
         if real_balance == 0:
-            print(f"  [FAIL] Polygon USDC balance: $0.00 — deposit USDC before trading")
+            print(f"  [FAIL] Polygon pUSD balance: $0.00 — run setup_live.py before trading")
             ok = False
         else:
-            print(f"  [OK] Polygon USDC balance: ${real_balance:.2f} USDC")
+            print(f"  [OK] Polygon pUSD balance: ${real_balance:.2f} pUSD")
             # Izvedi USDC hard limite iz stvarnog balansa
             config.MAX_LIVE_TRADE_USDC  = round(real_balance * config.MAX_LIVE_TRADE_PCT, 2)
             config.MIN_LIVE_BALANCE_USDC = round(real_balance * config.MIN_LIVE_BALANCE_PCT, 2)
@@ -469,7 +465,7 @@ class PolymarketBot:
             balance = await _fetch_usdc_balance(self.config.POLYGON_ADDRESS)
             if balance is not None:
                 self.risk.update_balance(balance)
-                logger.info("[LIVE] On-chain balance synced: $%.2f USDC", balance)
+                logger.info("[LIVE] On-chain pUSD balance synced: $%.2f", balance)
             else:
                 logger.warning("[LIVE] Balance sync failed — all Polygon RPCs unreachable")
 
