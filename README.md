@@ -28,6 +28,131 @@ Veličina pozicije se računa Half-Kelly kriterijem, ograničena na maksimalno 8
 
 ---
 
+## Kompletni setup guide — od nule do live tradinga
+
+### Korak 1 — Kreiraj Polymarket account
+
+1. Idi na [polymarket.com](https://polymarket.com)
+2. Klikni **Sign In** → **Continue with Email**
+3. Unesi email — dobit ćeš magic link, klikni ga
+4. Polymarket automatski kreira **DepositWallet** za tebe (Polygon pametni ugovor)
+5. Idi na **Profile → Wallet** — vidiš svoju wallet adresu (format `0x...`)
+   - Ovo je tvoj `POLYMARKET_PROXY_ADDRESS`
+
+### Korak 2 — Deponiraj sredstva
+
+Polymarket koristi **pUSD** (stablecoin na Polygonu).
+
+**Opcija A — direktno s kartice/banke:**
+1. Na Polymarket klikni **Deposit**
+2. Odaberi iznos, plati karticom ili bankovnim transferom
+3. sredstva se pojavljuju odmah u CLOB internom balansu
+
+**Opcija B — USDC s Polygon walleta:**
+1. Trebate USDC na Polygon mreži u MetaMask ili sličnom walletu
+2. Idi na **Deposit** → **Crypto** → pošalji USDC na prikazanu adresu
+3. Treba ti i malo POL (ex-MATIC) za gas (~$0.10 vrijedi)
+
+Preporučeni minimum za bot: **$20+**
+
+### Korak 3 — Izvuci API kredencijale
+
+Polymarket CLOB API zahtijeva poseban API key vezan uz tvoj wallet.
+
+1. Otvori [polymarket.com](https://polymarket.com) i prijavi se
+2. Otvori **DevTools** (F12) → tab **Application** → **Local Storage** → `https://polymarket.com`
+3. Traži ključeve koji sadrže `apiKey`, `secret`, `passphrase`
+
+   Alternativno, otvori **Network** tab → napravi neku radnju (npr. klikni na tržište) → filtriraj po `clob.polymarket.com` → pogledaj request headere — vidiš `POLY_API_KEY` i `POLY_SIGNATURE`
+
+4. Potrebna su ti 3 podatka:
+   - `POLY_API_KEY` — UUID format (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+   - `POLY_API_SECRET` — base64 string
+   - `POLY_API_PASSPHRASE` — dugi hex string
+
+### Korak 4 — Pripremi EOA wallet (za potpisivanje)
+
+Bot treba Polygon wallet s privatnim ključem za potpisivanje narudžbi.
+
+1. U MetaMasku kreiraj novi account (ili koristi postojeći)
+2. **Account Details → Export Private Key** → spremi kao `POLYGON_PRIVATE_KEY`
+3. Spremi adresu walleta kao `POLYGON_ADDRESS`
+4. Pošalji mali iznos POL na tu adresu za gas (opcijski, bot koristi CLOB internal balance)
+
+### Korak 5 — Konfiguriraj .env
+
+```env
+# Coinbase API (opcionalno — bot radi i bez, ali veza je stabilnija s keyem)
+COINBASE_API_KEY=organizations/xxx/apiKeys/yyy
+COINBASE_API_SECRET=-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----\n
+
+# Telegram (opcionalno — za notifikacije i remote komande)
+TELEGRAM_BOT_TOKEN=123456789:ABC...
+TELEGRAM_CHAT_ID=987654321
+
+# Paper trading početni balans
+PAPER_STARTING_BALANCE=1000.0
+
+# EOA wallet za potpisivanje
+POLYGON_PRIVATE_KEY=tvoj_private_key_bez_0x
+POLYGON_ADDRESS=0xtvoja_eoa_adresa
+
+# Polymarket DepositWallet i API
+POLYMARKET_PROXY_ADDRESS=0xtvoja_deposit_wallet_adresa
+POLY_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+POLY_API_SECRET=base64string==
+POLY_API_PASSPHRASE=hexstring...
+
+# Live trading (ostavi false dok testiras)
+LIVE_TRADING_ENABLED=false
+LIVE_TRADING_CONFIRMED=false
+LIVE_TRADING_RISK_ACKNOWLEDGED=false
+```
+
+### Korak 6 — Instaliraj i pokreni
+
+```bat
+# Setup (jednom)
+setup.bat
+
+# Aktiviraj venv
+venv\Scripts\activate
+
+# Pokreni u paper modu (bez pravog novca)
+python main.py
+```
+
+Paper mod simulira sve tradove virtualno s $1000. Prati nekoliko sati — ako vidis signale i profit u terminalu, sve radi.
+
+### Korak 7 — Prebaci na live trading
+
+Kad si zadovoljan paper performansama:
+
+1. Provjeri da imaš sredstva na Polymarket DepositWallet
+2. U `.env` postavi sve tri zastavice na `true`:
+   ```env
+   LIVE_TRADING_ENABLED=true
+   LIVE_TRADING_CONFIRMED=true
+   LIVE_TRADING_RISK_ACKNOWLEDGED=true
+   ```
+3. Pokreni bota — pri startu se izvodi pre-flight provjera svih sustava
+4. Bot čeka 30s i prikazuje sigurnosne limite — pritisni Ctrl+C za abort ako nešto ne štima
+
+### Sigurnosni limiti (live mod)
+
+Bot automatski izračunava limite iz stvarnog balansa pri pokretanju:
+
+| Limit | Vrijednost | Opis |
+|-------|-----------|------|
+| Max po tradu | 15% balansa | Hard cap na veličinu jedne pozicije |
+| Balance floor | 65% početnog | Kill switch ako balans padne ispod |
+| Max drawdown | 35% | Kill switch na dnevnom gubitku |
+| Max trades/sat | 10 | Rate limiting |
+
+Sve remote komande dostupne su putem Telegrama: `/status`, `/kill`, `/resume`
+
+---
+
 ## Brzi start
 
 ```bat
@@ -96,7 +221,7 @@ Bot radi i bez Coinbase key-a (javni WebSocket), ali s key-om je veza stabilnija
 | `MAX_POSITION_PCT` | 8% | Max % portfolia po tradu (Kelly cap) |
 | `KELLY_FRACTION` | 0.5 | Half-Kelly faktor |
 | `TAKER_FEE` | 2% | Polymarket taker fee |
-| `MAX_DAILY_DRAWDOWN` | 20% | Kill switch prag |
+| `MAX_DAILY_DRAWDOWN` | 35% | Kill switch prag |
 | `MAX_OPEN_POSITIONS` | 6 | Max istovremenih pozicija |
 | `MIN_MARKET_PRICE` | 15¢ | Odbaci deep OTM ugovore (model nije pouzdan) |
 | `UPDOWN_DURATIONS` | 5, 15 min | Trajanja ugovora koja bot prati |
@@ -127,7 +252,7 @@ LIVE_TRADING_RISK_ACKNOWLEDGED=true
 
 **Dinamički safety limiti** (računaju se iz stvarnog balansa pri pokretanju):
 - Max po tradu: 15% balansa
-- Kill switch: ako balans padne ispod 10% početnog
+- Kill switch: ako balans padne ispod 65% početnog (max 35% gubitak)
 - Max 10 tradova po satu
 
 ---
