@@ -325,9 +325,14 @@ class PolymarketClient:
                 size  = round(usdc_amount / price, 2)
 
             clob_side = "SELL" if side == "sell" else "BUY"
-            order_args = MarketOrderArgsV2(token_id=token_id, amount=size, side=clob_side)
-            signed_order = self._clob_client.create_market_order(order_args)
-            resp = self._clob_client.post_order(signed_order)
+            builder_code = getattr(self.config, 'POLYMARKET_BUILDER_CODE', None)
+            order_args = MarketOrderArgsV2(
+                token_id=token_id,
+                amount=size,
+                side=clob_side,
+                builder_code=builder_code,
+            )
+            resp = self._clob_client.create_and_post_market_order(order_args)
 
             order_id = (resp or {}).get("orderID") or (resp or {}).get("order_id")
             if not order_id:
@@ -336,13 +341,13 @@ class PolymarketClient:
 
             logger.info("Order submitted %s — polling for CONFIRMED status", order_id)
 
-            # Polliraj za CONFIRMED (ispunjen + namiren na Polygonu) — do 30s
-            confirmed = await self._poll_order_confirmed(order_id, timeout=30.0)
+            # Polliraj za CONFIRMED (ispunjen + namiren na Polygonu) — do 90s
+            confirmed = await self._poll_order_confirmed(order_id, timeout=90.0)
             if confirmed:
                 logger.info("Order CONFIRMED: %s", order_id)
                 return confirmed
             else:
-                logger.warning("Order %s did not reach CONFIRMED within 30s — treating as failed", order_id)
+                logger.warning("Order %s did not reach CONFIRMED within 90s — treating as failed", order_id)
                 return None
 
         except Exception as exc:
@@ -536,20 +541,34 @@ class PolymarketClient:
     async def _init_clob_client(self):
         try:
             from py_clob_client_v2.client import ClobClient
+            from py_clob_client_v2.clob_types import ApiCreds
             loop = asyncio.get_running_loop()
 
-            # Level 1: private key autentikacija
+            # DepositWallet (Magic.link proxy) — holds pUSD, sig_type=3 (POLY_1271).
+            # EOA (POLYGON_PRIVATE_KEY) signs ERC-7739 wrapped hashes on behalf of wallet.
+            proxy = getattr(self.config, 'POLYMARKET_PROXY_ADDRESS',
+                            '0x8bBb164A4BEA02478670132B668896beD695e373')
+
+            creds = ApiCreds(
+                api_key=getattr(self.config, 'POLY_API_KEY', '760e67b1-4293-2c26-bef2-ed4519d1053c'),
+                api_secret=getattr(self.config, 'POLY_API_SECRET', 'LlH39v7Dl5aAjScmZumfX0YCJnT0vqPbb7qgcJMAkiI='),
+                api_passphrase=getattr(self.config, 'POLY_API_PASSPHRASE', '78a335ba9a7ca108573c376fbd1361a7abe599254581f1007729a833e507c94b'),
+            )
+
             client = ClobClient(
                 host=CLOB_URL,
                 chain_id=137,
                 key=self.config.POLYGON_PRIVATE_KEY,
+                creds=creds,
+                signature_type=3,       # POLY_1271 — DepositWallet / ERC-7739
+                funder=proxy,
             )
 
-            # Level 2: deriviraj API credentials iz private keya (potrebno za post_order)
-            creds = await loop.run_in_executor(None, client.create_or_derive_api_key)
-            client.set_api_creds(creds)
-
             self._clob_client = client
-            logger.info("CLOB client (V2) inicijaliziran — api_key=%s...", str(creds.api_key)[:8])
+            logger.info(
+                "CLOB client (V2, POLY_1271) init — proxy=%s... api_key=%s...",
+                proxy[:10],
+                creds.api_key[:8],
+            )
         except Exception as exc:
             logger.error("Failed to init CLOB client: %s", exc)

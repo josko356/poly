@@ -266,26 +266,35 @@ if _TEXTUAL_OK:
                 pass
 
         def _build(self) -> str:
-            rs  = self._d.risk.status()
-            cfg = self._d.config
-            dd  = rs["daily_drawdown_pct"]
-            bal = rs["balance_drawdown_pct"]
-            lim = cfg.MAX_DAILY_DRAWDOWN
+            rs   = self._d.risk.status()
+            cfg  = self._d.config
+            live = getattr(cfg, "is_live_trading", False)
+            dd   = rs["daily_drawdown_pct"]
+            bal  = rs["balance_drawdown_pct"]
+            lim  = cfg.MAX_DAILY_DRAWDOWN
             bar_len = 12
             filled  = min(int((dd / lim) * bar_len), bar_len) if lim > 0 else 0
             dc = "red" if dd > lim * 0.7 else "yellow" if dd > lim * 0.4 else "green"
             bar = f"[{dc}]{'█' * filled}[/][dim]{'░' * (bar_len - filled)}[/]"
             alloc = f"\n  {_dim(f'balance alloc: {bal:.1%}')}" if bal > 0.01 else ""
 
+            if live:
+                max_trade_str = f"[white]${getattr(cfg, 'MAX_LIVE_TRADE_USDC', 0):.2f} ({getattr(cfg, 'MAX_LIVE_TRADE_PCT', 0):.0%})[/]"
+                floor_str     = f"[white]${getattr(cfg, 'MIN_LIVE_BALANCE_USDC', 0):.2f} ({getattr(cfg, 'MIN_LIVE_BALANCE_PCT', 0):.0%})[/]"
+            else:
+                max_trade_str = f"[white]{cfg.MAX_POSITION_PCT:.0%} of portfolio[/]"
+                floor_str     = _dim("n/a (paper mode)")
+
             rows = [
                 _bold("RISK CONTROLS", "#4da6e8"),
-                _dim("Portfolio protection — kill switch at 20% realized loss"),
+                _dim(f"Portfolio protection — kill switch at {lim:.0%} realized loss"),
                 "",
                 _dim(f"Realized daily loss  (fires kill switch at {lim:.0%})"),
                 f"  {bar} [{dc}]{dd:.1%}/{lim:.0%}[/]{alloc}",
                 "",
                 _dim("Open positions") + "    " + f"[white]{rs['open_positions']}/{cfg.MAX_OPEN_POSITIONS}[/]",
-                _dim("Max trade size") + "    " + f"[white]{cfg.MAX_POSITION_PCT:.0%} of portfolio[/]",
+                _dim("Max trade size") + "    " + max_trade_str,
+                _dim("Balance floor") + "     " + floor_str,
                 _dim("Min signal edge") + "   " + f"[white]{cfg.MIN_EDGE:.0%}[/]",
                 _dim("Min confidence") + "    " + f"[white]{cfg.MIN_CONFIDENCE:.0%}[/]",
                 _dim("Kelly fraction") + "    " + f"[white]½  ({cfg.KELLY_FRACTION:.0%})[/]",

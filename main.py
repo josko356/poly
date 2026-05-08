@@ -186,21 +186,32 @@ async def _live_preflight(config, bot) -> bool:
         print("  [FAIL] Coinbase price feed not active")
         ok = False
 
-    # 7. Stvarni on-chain pUSD balans + izracun dinamickih limita
-    real_balance = await _fetch_usdc_balance(config.POLYGON_ADDRESS)
+    # 7. CLOB internal pUSD balance + izracun dinamickih limita
+    real_balance = None
+    try:
+        from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+        clob = bot.polymarket._clob_client
+        if clob:
+            bal_info = await asyncio.get_running_loop().run_in_executor(
+                None, clob.get_balance_allowance,
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            raw = int(bal_info.get("balance", 0))
+            real_balance = raw / 1e6
+    except Exception as _e:
+        logger.warning("Could not read CLOB balance: %s", _e)
+
     if real_balance is not None:
         if real_balance == 0:
-            print(f"  [FAIL] Polygon pUSD balance: $0.00 — run setup_live.py before trading")
+            print(f"  [FAIL] CLOB pUSD balance: $0.00 — deposit pUSD to the DepositWallet first")
             ok = False
         else:
-            print(f"  [OK] Polygon pUSD balance: ${real_balance:.2f} pUSD")
-            # Izvedi USDC hard limite iz stvarnog balansa
+            print(f"  [OK] CLOB pUSD balance: ${real_balance:.2f} pUSD")
             config.MAX_LIVE_TRADE_USDC  = round(real_balance * config.MAX_LIVE_TRADE_PCT, 2)
             config.MIN_LIVE_BALANCE_USDC = round(real_balance * config.MIN_LIVE_BALANCE_PCT, 2)
-        # Sinkroniziraj risk manager da prati stvarni novcanik, ne paper zadanu vrijednost
         bot.risk.update_balance(real_balance)
     else:
-        print("  [WARN] Could not read on-chain USDC balance (RPC unreachable) — proceeding with caution")
+        print("  [WARN] Could not read CLOB pUSD balance — proceeding with caution")
 
     # 8. Sazetak sigurnosnih limita
     print(f"\n  Safety limits active:")
@@ -243,7 +254,8 @@ class PolymarketBot:
             config=config,
             refresh_interval=config.CONTRACT_REFRESH_INTERVAL,
         )
-        self.risk = RiskManager(config, config.PAPER_STARTING_BALANCE)
+        starting_bal = 0.0 if config.is_live_trading else config.PAPER_STARTING_BALANCE
+        self.risk = RiskManager(config, starting_bal)
         self.telegram = TelegramBot(
             token=config.TELEGRAM_BOT_TOKEN,
             chat_id=config.TELEGRAM_CHAT_ID,
@@ -456,18 +468,23 @@ class PolymarketBot:
 
     async def _live_balance_syncer(self):
         """
-        Svakih 60s dohvaca stvarni on-chain USDC balans i sinkronizira risk manager.
-        Sprecava unutarnji tracker balansa da zaostane za stvarnoscu (npr. ako se nalog
-        namiri on-chain bez cistog callbacka, ili ako se sredstva povuku).
+        Svakih 60s dohvaca CLOB interni pUSD balans i sinkronizira risk manager.
         """
         while self._running:
             await asyncio.sleep(60)
-            balance = await _fetch_usdc_balance(self.config.POLYGON_ADDRESS)
-            if balance is not None:
-                self.risk.update_balance(balance)
-                logger.info("[LIVE] On-chain pUSD balance synced: $%.2f", balance)
-            else:
-                logger.warning("[LIVE] Balance sync failed — all Polygon RPCs unreachable")
+            try:
+                from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+                clob = self.polymarket._clob_client
+                if clob:
+                    bal_info = await asyncio.get_running_loop().run_in_executor(
+                        None, clob.get_balance_allowance,
+                        BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+                    )
+                    balance = int(bal_info.get("balance", 0)) / 1e6
+                    self.risk.update_balance(balance)
+                    logger.info("[LIVE] CLOB pUSD balance synced: $%.2f", balance)
+            except Exception as e:
+                logger.warning("[LIVE] Balance sync failed: %s", e)
 
     async def _daily_summary_sender(self):
         while self._running:

@@ -51,7 +51,7 @@ class Config:
     # 15-min: siri spreadovi + manja HFT konkurencija; isti feevi kao 5-min (1.80% BTC/ETH)
 
     # ── Risk management ──────────────────────────────────────────
-    MAX_DAILY_DRAWDOWN: float = 0.20
+    MAX_DAILY_DRAWDOWN: float = 0.35
     MAX_OPEN_POSITIONS: int = 6
     COOLDOWN_AFTER_KILL_SECS: int = 3600
     EARLY_EXIT_THRESHOLD: float = 0.35  # izlaz ako token mid padne ispod 35% ulazne cijene
@@ -62,7 +62,7 @@ class Config:
     # Postotni limiti — izracunati iz stvarnog balansa novcanika pri pokretanju.
     # Na taj nacin ista konfiguracija radi bez obzira jesi li uplatio $20 ili $2000.
     MAX_LIVE_TRADE_PCT: float = 0.15      # max 15% balansa po jednoj transakciji (hard cap iznad Kellyjevih 8%)
-    MIN_LIVE_BALANCE_PCT: float = 0.10    # kill switch prag: zaustavi ako balans padne ispod 10% pocetne vrijednosti
+    MIN_LIVE_BALANCE_PCT: float = 0.65    # kill switch prag: zaustavi ako balans padne ispod 65% pocetne vrijednosti
 
     # Popunjava se automatski iz live balansa × gornji postotak — ne postavljaj rucno.
     MAX_LIVE_TRADE_USDC: float = 0.0
@@ -78,7 +78,10 @@ class Config:
 
     # ── Paper trading ────────────────────────────────────────────
     PAPER_STARTING_BALANCE: float = float(os.getenv("PAPER_STARTING_BALANCE", "1000.0"))
-    PAPER_FILL_SLIPPAGE: float = 0.002
+    PAPER_FILL_SLIPPAGE: float = 0.005         # minimalni slippage (0.5%)
+    PAPER_FILL_SLIPPAGE_MAX: float = 0.010     # maksimalni slippage (1.0%)
+    PAPER_FOK_FILL_RATE: float = 0.55          # latency arb filluje ~55% puta
+    PAPER_BUNDLE_FILL_RATE: float = 0.80       # bundle filluje ~80% puta
 
     # ── Dashboard ────────────────────────────────────────────────
     DASHBOARD_REFRESH_RATE: float = 1.0
@@ -86,6 +89,30 @@ class Config:
     # ── Polygon wallet (live trading) ────────────────────────────
     POLYGON_PRIVATE_KEY: str = field(default_factory=lambda: os.getenv("POLYGON_PRIVATE_KEY", ""))
     POLYGON_ADDRESS: str = field(default_factory=lambda: os.getenv("POLYGON_ADDRESS", ""))
+
+    # ── Polymarket V2 CLOB wallet (Gnosis Safe, maker address) ───
+    # Gnosis Safe derived from your EOA by the V2 exchange factory.
+    # This address holds pUSD and has MAX allowances for V2 contracts.
+    # Signer (POLYGON_PRIVATE_KEY) signs orders on behalf of this Safe.
+    POLYMARKET_SAFE_ADDRESS: str = field(
+        default_factory=lambda: os.getenv(
+            "POLYMARKET_SAFE_ADDRESS",
+            "0x64346D1eFB192c3d7e250e9e34C301b3A24196e4",
+        )
+    )
+    # Builder code gives 0% maker+taker fees (optional but recommended)
+    POLYMARKET_BUILDER_ADDRESS: str = field(
+        default_factory=lambda: os.getenv(
+            "POLYMARKET_BUILDER_ADDRESS",
+            "0x8bbb37591e2EC3c6EDAEB7d1Aa40Af1Da2e2Fb00",
+        )
+    )
+    POLYMARKET_BUILDER_CODE: str = field(
+        default_factory=lambda: os.getenv(
+            "POLYMARKET_BUILDER_CODE",
+            "0x3a8c20ec361108e79212657f4e6b9f7f47337af827db85308b74764cc79e9c6d",
+        )
+    )
 
     # ── Telegram ─────────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
